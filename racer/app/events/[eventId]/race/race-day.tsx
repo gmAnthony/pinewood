@@ -1,0 +1,1108 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+type LaneInfo = {
+  laneNumber: number;
+  carId: string;
+  carNumber: number;
+  carName: string;
+  displayName: string;
+  seedNumber: number | null;
+  timeMs: number | null;
+  resultCode: string | null;
+  place: number | null;
+};
+
+type Race = {
+  id: string;
+  phaseId?: string;
+  raceNumber: number;
+  status: string;
+  divisionName: string;
+  phaseType?: string;
+  roundNumber?: number | null;
+  groupNumber?: number | null;
+  lanes: LaneInfo[];
+};
+
+type ByeInfo = {
+  carId: string;
+  seedNumber: number;
+  carNumber?: number;
+  displayName?: string;
+  carName?: string;
+};
+
+type TournamentPhaseInfo = {
+  phaseId: string;
+  divisionId: string;
+  divisionName: string;
+  phaseStatus: string;
+  byes?: ByeInfo[];
+};
+
+type HeatResult = { raceNumber: number; timeMs: number };
+
+type LeaderboardEntry = {
+  carId: string;
+  carNumber: number;
+  carName: string;
+  displayName: string;
+  heats: HeatResult[];
+  averageTimeMs: number;
+  seed: number;
+};
+
+type LeaderboardDivision = {
+  divisionName: string;
+  entries: LeaderboardEntry[];
+};
+
+type QualifyingDivision = {
+  divisionId: string;
+  divisionName: string;
+};
+
+type RacesResponse = {
+  races?: Race[];
+  tournamentRaces?: Race[];
+  tournamentPhases?: TournamentPhaseInfo[];
+  qualifyingDivisions?: QualifyingDivision[];
+  error?: string;
+};
+type ActionResponse = { message?: string; error?: string; tournamentDone?: boolean; roundComplete?: boolean };
+type LeaderboardResponse = { divisions?: LeaderboardDivision[]; error?: string };
+
+function formatTime(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const hundredths = Math.floor((ms % 1000) / 10);
+  return `${seconds}.${String(hundredths).padStart(2, "0")}`;
+}
+
+function LaneTimer({
+  lane,
+  running,
+  startTime,
+  onFinish,
+}: {
+  lane: LaneInfo;
+  running: boolean;
+  startTime: number | null;
+  onFinish: (laneNumber: number, timeMs: number) => void;
+}) {
+  const [elapsed, setElapsed] = useState(0);
+  const [finished, setFinished] = useState(false);
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!running || !startTime || finished) return;
+
+    function tick() {
+      setElapsed(Date.now() - startTime!);
+      rafRef.current = requestAnimationFrame(tick);
+    }
+    rafRef.current = requestAnimationFrame(tick);
+
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [running, startTime, finished]);
+
+  function handleFinish() {
+    if (!startTime) return;
+    const finalTime = Date.now() - startTime;
+    setElapsed(finalTime);
+    setFinished(true);
+    cancelAnimationFrame(rafRef.current);
+    onFinish(lane.laneNumber, finalTime);
+  }
+
+  const displayTime = lane.timeMs != null ? lane.timeMs : running || finished ? elapsed : 0;
+
+  return (
+    <div className={`flex items-center gap-4 rounded-xl border px-4 py-3 ${
+      finished || lane.timeMs != null
+        ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950"
+        : running
+          ? "border-blue-300 bg-blue-50 dark:border-blue-800 dark:bg-blue-950"
+          : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900"
+    }`}>
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-sm font-bold text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300">
+        {lane.laneNumber}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+          {lane.seedNumber != null && (
+            <span className="mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-purple-100 text-[10px] font-bold text-purple-700 dark:bg-purple-900 dark:text-purple-300">
+              {lane.seedNumber}
+            </span>
+          )}
+          #{lane.carNumber} {lane.displayName}
+        </p>
+        <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+          {lane.carName}
+        </p>
+      </div>
+
+      <div className="text-right">
+        <p className="font-mono text-xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">
+          {formatTime(displayTime)}
+        </p>
+        {lane.place != null && (
+          <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            {lane.place === 1 ? "1st" : lane.place === 2 ? "2nd" : `${lane.place}th`}
+          </p>
+        )}
+      </div>
+
+      {running && !finished && lane.timeMs == null && (
+        <button
+          type="button"
+          onClick={handleFinish}
+          className="shrink-0 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-500"
+        >
+          Finish
+        </button>
+      )}
+
+      {(finished || lane.timeMs != null) && (
+        <span className="shrink-0 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+          Done
+        </span>
+      )}
+    </div>
+  );
+}
+
+function RaceCard({
+  race,
+  role,
+  eventId,
+  onRaceFinished,
+}: {
+  race: Race;
+  role: "current" | "on_deck" | "in_the_hole" | "finished" | "upcoming";
+  eventId: string;
+  onRaceFinished: () => void;
+}) {
+  const [running, setRunning] = useState(false);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [laneResults, setLaneResults] = useState<Map<number, number>>(new Map());
+  const [submitting, setSubmitting] = useState(false);
+
+  const allLanesFinished = race.lanes.every(
+    (l) => l.timeMs != null || laneResults.has(l.laneNumber)
+  );
+
+  const isAlreadyFinished = race.status === "finished";
+
+  function handleStart() {
+    setRunning(true);
+    setStartTime(Date.now());
+    setLaneResults(new Map());
+  }
+
+  function handleLaneFinish(laneNumber: number, timeMs: number) {
+    setLaneResults((prev) => {
+      const next = new Map(prev);
+      next.set(laneNumber, timeMs);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (!running || !allLanesFinished || submitting || isAlreadyFinished) return;
+
+    async function submitResults() {
+      setSubmitting(true);
+      try {
+        const results = race.lanes.map((l) => ({
+          laneNumber: l.laneNumber,
+          timeMs: laneResults.get(l.laneNumber) ?? 0,
+        }));
+
+        const response = await fetch(
+          `/api/events/${eventId}/races/${race.id}/result`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ laneResults: results }),
+          }
+        );
+
+        const data = (await response.json()) as ActionResponse;
+        if (!response.ok) {
+          console.error(data.error);
+          return;
+        }
+
+        setRunning(false);
+        onRaceFinished();
+      } catch {
+        console.error("Failed to submit results");
+      } finally {
+        setSubmitting(false);
+      }
+    }
+
+    void submitResults();
+  }, [allLanesFinished, running, submitting, isAlreadyFinished, laneResults, race, eventId, onRaceFinished]);
+
+  const roleLabels: Record<string, { text: string; color: string }> = {
+    current: { text: "Current Race", color: "bg-blue-600 text-white" },
+    on_deck: { text: "On Deck", color: "bg-amber-500 text-white" },
+    in_the_hole: { text: "In the Hole", color: "bg-zinc-500 text-white" },
+    finished: { text: "Finished", color: "bg-emerald-600 text-white" },
+    upcoming: { text: "Upcoming", color: "bg-zinc-300 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300" },
+  };
+
+  const label = roleLabels[role] ?? roleLabels.upcoming;
+
+  return (
+    <div className={`rounded-2xl border p-5 shadow-sm ${
+      role === "current"
+        ? "border-blue-300 bg-white dark:border-blue-800 dark:bg-zinc-950"
+        : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+    }`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+            Heat {race.raceNumber}
+          </h3>
+          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+            {race.divisionName}
+          </span>
+          <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${label.color}`}>
+            {label.text}
+          </span>
+        </div>
+
+        {role === "current" && !running && !isAlreadyFinished && (
+          <button
+            type="button"
+            onClick={handleStart}
+            className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
+          >
+            Start Race
+          </button>
+        )}
+
+        {submitting && (
+          <span className="text-sm text-zinc-500 dark:text-zinc-400">Saving results...</span>
+        )}
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {race.lanes.map((lane) => (
+          <LaneTimer
+            key={lane.laneNumber}
+            lane={lane}
+            running={running && role === "current"}
+            startTime={startTime}
+            onFinish={handleLaneFinish}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`;
+}
+
+function Leaderboard({
+  eventId,
+  refreshKey,
+}: {
+  eventId: string;
+  refreshKey: number;
+}) {
+  const [divisions, setDivisions] = useState<LeaderboardDivision[]>([]);
+  const [open, setOpen] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch(`/api/events/${eventId}/leaderboard`);
+        const data = (await res.json()) as LeaderboardResponse;
+        if (res.ok && data.divisions) setDivisions(data.divisions);
+      } catch {
+        /* ignore */
+      }
+    }
+    void load();
+  }, [eventId, refreshKey]);
+
+  if (divisions.length === 0 || divisions.every((d) => d.entries.length === 0)) {
+    return null;
+  }
+
+  const maxHeats = Math.max(...divisions.flatMap((d) => d.entries.map((e) => e.heats.length)));
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="mb-3 flex w-full items-center gap-2 text-left"
+      >
+        <h3 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+          Leaderboard
+        </h3>
+        <svg
+          className={`h-4 w-4 text-zinc-400 transition-transform ${open ? "rotate-180" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open &&
+        divisions.map((division) => (
+          <div
+            key={division.divisionName}
+            className="mb-4 overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+          >
+            <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900">
+              <h4 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                {division.divisionName}
+              </h4>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-zinc-100 dark:border-zinc-800">
+                    <th className="whitespace-nowrap px-4 py-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                      Seed
+                    </th>
+                    <th className="whitespace-nowrap px-4 py-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                      Racer
+                    </th>
+                    <th className="whitespace-nowrap px-4 py-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                      Car
+                    </th>
+                    {Array.from({ length: maxHeats }, (_, i) => (
+                      <th
+                        key={i}
+                        className="whitespace-nowrap px-4 py-2 text-right text-xs font-medium text-zinc-500 dark:text-zinc-400"
+                      >
+                        Heat {i + 1}
+                      </th>
+                    ))}
+                    <th className="whitespace-nowrap px-4 py-2 text-right text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                      Avg
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {division.entries.map((entry) => (
+                    <tr
+                      key={entry.carId}
+                      className="border-b border-zinc-50 last:border-0 dark:border-zinc-800/50"
+                    >
+                      <td className="whitespace-nowrap px-4 py-2">
+                        <span
+                          className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${
+                            entry.seed === 1
+                              ? "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-300"
+                              : entry.seed === 2
+                                ? "bg-zinc-200 text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300"
+                                : entry.seed === 3
+                                  ? "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300"
+                                  : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400"
+                          }`}
+                        >
+                          {entry.seed}
+                        </span>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2 font-medium text-zinc-900 dark:text-zinc-100">
+                        #{entry.carNumber} {entry.displayName}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-2 text-zinc-500 dark:text-zinc-400">
+                        {entry.carName}
+                      </td>
+                      {Array.from({ length: maxHeats }, (_, i) => {
+                        const heat = entry.heats[i];
+                        return (
+                          <td
+                            key={i}
+                            className="whitespace-nowrap px-4 py-2 text-right font-mono tabular-nums text-zinc-600 dark:text-zinc-400"
+                          >
+                            {heat ? `${formatTime(heat.timeMs)}s` : "—"}
+                          </td>
+                        );
+                      })}
+                      <td className="whitespace-nowrap px-4 py-2 text-right font-mono tabular-nums font-semibold text-zinc-900 dark:text-zinc-100">
+                        {formatTime(entry.averageTimeMs)}s
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="border-t border-zinc-100 bg-zinc-50 px-4 py-2 dark:border-zinc-800 dark:bg-zinc-900">
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                {division.entries.length} racer{division.entries.length !== 1 ? "s" : ""} ·{" "}
+                {ordinal(1)} seed: #{division.entries[0]?.carNumber} {division.entries[0]?.displayName} ({formatTime(division.entries[0]?.averageTimeMs ?? 0)}s avg)
+              </p>
+            </div>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+function TournamentRaceCard({
+  race,
+  isCurrent,
+  eventId,
+  onRaceFinished,
+}: {
+  race: Race;
+  isCurrent: boolean;
+  eventId: string;
+  onRaceFinished: () => void;
+}) {
+  const [lanes, setLanes] = useState(race.lanes);
+  const [swapping, setSwapping] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [laneResults, setLaneResults] = useState<Map<number, number>>(new Map());
+  const [submitting, setSubmitting] = useState(false);
+
+  const isFinished = race.status === "finished";
+  const allLanesFinished = lanes.every(
+    (l) => l.timeMs != null || laneResults.has(l.laneNumber)
+  );
+
+  async function handleSwapLanes() {
+    if (lanes.length !== 2) return;
+    setSwapping(true);
+    try {
+      const swapped = [
+        { laneNumber: 1, carId: lanes[1].carId },
+        { laneNumber: 2, carId: lanes[0].carId },
+      ];
+      const res = await fetch(
+        `/api/events/${eventId}/races/${race.id}/lanes`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lanes: swapped }),
+        }
+      );
+      if (res.ok) {
+        setLanes([
+          { ...lanes[1], laneNumber: 1 },
+          { ...lanes[0], laneNumber: 2 },
+        ]);
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setSwapping(false);
+    }
+  }
+
+  function handleStart() {
+    setRunning(true);
+    setStartTime(Date.now());
+    setLaneResults(new Map());
+  }
+
+  function handleLaneFinish(laneNumber: number, timeMs: number) {
+    setLaneResults((prev) => {
+      const next = new Map(prev);
+      next.set(laneNumber, timeMs);
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (!running || !allLanesFinished || submitting || isFinished) return;
+
+    async function submitResults() {
+      setSubmitting(true);
+      try {
+        const results = lanes.map((l) => ({
+          laneNumber: l.laneNumber,
+          timeMs: laneResults.get(l.laneNumber) ?? 0,
+        }));
+        const response = await fetch(
+          `/api/events/${eventId}/races/${race.id}/result`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ laneResults: results }),
+          }
+        );
+        if (response.ok) {
+          setRunning(false);
+          onRaceFinished();
+        }
+      } catch {
+        /* ignore */
+      } finally {
+        setSubmitting(false);
+      }
+    }
+
+    void submitResults();
+  }, [allLanesFinished, running, submitting, isFinished, laneResults, lanes, race, eventId, onRaceFinished]);
+
+  return (
+    <div
+      className={`rounded-2xl border p-5 shadow-sm ${
+        isCurrent && !isFinished
+          ? "border-purple-300 bg-white dark:border-purple-800 dark:bg-zinc-950"
+          : isFinished
+            ? "border-emerald-200 bg-white dark:border-emerald-900 dark:bg-zinc-950"
+            : "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
+            Round {race.roundNumber} · Match {race.groupNumber}
+          </h3>
+          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+            {race.divisionName}
+          </span>
+          {isFinished && (
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+              Finished
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {isCurrent && !running && !isFinished && (
+            <>
+              <button
+                type="button"
+                onClick={() => void handleSwapLanes()}
+                disabled={swapping}
+                className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+              >
+                {swapping ? "..." : "Swap Lanes"}
+              </button>
+              <button
+                type="button"
+                onClick={handleStart}
+                className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-500"
+              >
+                Start Race
+              </button>
+            </>
+          )}
+          {submitting && (
+            <span className="text-sm text-zinc-500 dark:text-zinc-400">Saving...</span>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {lanes.map((lane) => (
+          <LaneTimer
+            key={`${race.id}-${lane.laneNumber}`}
+            lane={lane}
+            running={running && isCurrent}
+            startTime={startTime}
+            onFinish={handleLaneFinish}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TournamentSection({
+  eventId,
+  tournamentRaces,
+  tournamentPhases,
+  qualifyingDivisionList,
+  qualifyingDone,
+  onDataChanged,
+}: {
+  eventId: string;
+  tournamentRaces: Race[];
+  tournamentPhases: TournamentPhaseInfo[];
+  qualifyingDivisionList: QualifyingDivision[];
+  qualifyingDone: boolean;
+  onDataChanged: () => void;
+}) {
+  const [startingDivId, setStartingDivId] = useState<string | null>(null);
+  const [advancingPhaseId, setAdvancingPhaseId] = useState<string | null>(null);
+
+  const startedDivisionIds = new Set(tournamentPhases.map((p) => p.divisionId));
+
+  const unstartedDivisions = qualifyingDivisionList.filter(
+    (d) => !startedDivisionIds.has(d.divisionId)
+  );
+
+  async function handleStartTournament(divisionId: string) {
+    if (!confirm("Start the single-elimination tournament for this division?")) return;
+    setStartingDivId(divisionId);
+    try {
+      const res = await fetch(
+        `/api/events/${eventId}/divisions/${divisionId}/start-tournament`,
+        { method: "POST" }
+      );
+      const data = (await res.json()) as ActionResponse;
+      if (!res.ok) {
+        alert(data.error ?? "Failed to start tournament");
+        return;
+      }
+      onDataChanged();
+    } catch {
+      alert("Failed to start tournament");
+    } finally {
+      setStartingDivId(null);
+    }
+  }
+
+  async function handleAdvanceRound(phaseId: string) {
+    setAdvancingPhaseId(phaseId);
+    try {
+      const res = await fetch(`/api/events/${eventId}/advance-tournament`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phaseId }),
+      });
+      const data = (await res.json()) as ActionResponse;
+      if (!res.ok) {
+        alert(data.error ?? "Failed to advance tournament");
+        return;
+      }
+      if (data.tournamentDone) {
+        alert(data.message ?? "Tournament complete!");
+      }
+      onDataChanged();
+    } catch {
+      alert("Failed to advance tournament");
+    } finally {
+      setAdvancingPhaseId(null);
+    }
+  }
+
+  if (!qualifyingDone && tournamentPhases.length === 0) return null;
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+        Tournament
+      </h3>
+
+      {qualifyingDone && unstartedDivisions.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {unstartedDivisions.map((div) => (
+            <button
+              key={div.divisionId}
+              type="button"
+              disabled={startingDivId === div.divisionId}
+              onClick={() => void handleStartTournament(div.divisionId)}
+              className="rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
+            >
+              {startingDivId === div.divisionId
+                ? "Starting..."
+                : `Start Tournament — ${div.divisionName}`}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tournamentPhases.map((phase) => {
+        const phaseRaces = tournamentRaces.filter(
+          (r) => r.phaseId === phase.phaseId
+        );
+        const rounds = [...new Set(phaseRaces.map((r) => r.roundNumber ?? 1))].sort(
+          (a, b) => a - b
+        );
+        const currentRound = rounds[rounds.length - 1] ?? 1;
+        const currentRoundRaces = phaseRaces.filter(
+          (r) => r.roundNumber === currentRound
+        );
+        const previousRoundRaces = phaseRaces.filter(
+          (r) => (r.roundNumber ?? 0) < currentRound
+        );
+
+        const allCurrentRoundFinished =
+          currentRoundRaces.length > 0 &&
+          currentRoundRaces.every((r) => r.status === "finished");
+        const pendingCurrentRound = currentRoundRaces.filter(
+          (r) => r.status === "pending"
+        );
+        const currentMatch = pendingCurrentRound[0] ?? null;
+
+        const isChampionshipDecided =
+          phase.phaseStatus === "completed" ||
+          (allCurrentRoundFinished && currentRoundRaces.length === 1);
+
+        let champion: LaneInfo | null = null;
+        if (isChampionshipDecided && currentRoundRaces.length === 1) {
+          const finalRace = currentRoundRaces[0];
+          champion =
+            finalRace.lanes.find((l) => l.place === 1) ?? null;
+        }
+
+        return (
+          <div
+            key={phase.phaseId}
+            className="overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+          >
+            <div className="flex items-center justify-between border-b border-zinc-200 bg-purple-50 px-4 py-3 dark:border-zinc-800 dark:bg-purple-950/30">
+              <h4 className="text-sm font-semibold text-purple-800 dark:text-purple-300">
+                {phase.divisionName} — Tournament
+              </h4>
+              <span className="text-xs text-purple-600 dark:text-purple-400">
+                Round {currentRound} · {currentRoundRaces.length} match
+                {currentRoundRaces.length !== 1 ? "es" : ""}
+              </span>
+            </div>
+
+            {champion && (
+              <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-center dark:border-amber-900 dark:bg-amber-950/30">
+                <p className="text-lg font-bold text-amber-700 dark:text-amber-300">
+                  Champion: #{champion.carNumber} {champion.displayName}
+                </p>
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  {champion.carName}
+                  {champion.timeMs != null ? ` · ${formatTime(champion.timeMs)}s` : ""}
+                </p>
+              </div>
+            )}
+
+            {phase.byes && phase.byes.length > 0 && currentRound === 1 && (
+              <div className="border-b border-zinc-100 px-4 py-2 dark:border-zinc-800">
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Round 1 Byes
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {phase.byes.map((bye) => (
+                    <span
+                      key={bye.carId}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-purple-200 bg-purple-50 px-3 py-1 text-xs dark:border-purple-800 dark:bg-purple-950/40"
+                    >
+                      <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-purple-200 text-[9px] font-bold text-purple-700 dark:bg-purple-800 dark:text-purple-300">
+                        {bye.seedNumber}
+                      </span>
+                      <span className="font-medium text-purple-800 dark:text-purple-300">
+                        #{bye.carNumber} {bye.displayName}
+                      </span>
+                      <span className="text-purple-500 dark:text-purple-400">
+                        — advances to Round 2
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-3 p-4">
+              {currentRoundRaces.map((race) => (
+                <TournamentRaceCard
+                  key={race.id}
+                  race={race}
+                  isCurrent={currentMatch?.id === race.id}
+                  eventId={eventId}
+                  onRaceFinished={onDataChanged}
+                />
+              ))}
+
+              {allCurrentRoundFinished && !isChampionshipDecided && (
+                <div className="flex justify-center pt-2">
+                  <button
+                    type="button"
+                    disabled={advancingPhaseId === phase.phaseId}
+                    onClick={() => void handleAdvanceRound(phase.phaseId)}
+                    className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
+                  >
+                    {advancingPhaseId === phase.phaseId
+                      ? "Generating..."
+                      : `Advance to Round ${currentRound + 1}`}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {previousRoundRaces.length > 0 && (
+              <div className="border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Previous Rounds
+                </p>
+                <div className="space-y-1">
+                  {previousRoundRaces.map((race) => (
+                    <div
+                      key={race.id}
+                      className="flex items-center justify-between rounded-lg bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-900"
+                    >
+                      <span className="text-zinc-600 dark:text-zinc-400">
+                        R{race.roundNumber} M{race.groupNumber}
+                      </span>
+                      <div className="flex gap-3">
+                        {race.lanes
+                          .sort((a, b) => (a.place ?? 99) - (b.place ?? 99))
+                          .map((l) => (
+                            <span key={l.laneNumber}>
+                              <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                                {l.place === 1 ? "W" : "L"}
+                              </span>{" "}
+                              {l.seedNumber != null && (
+                                <span className="text-purple-500 dark:text-purple-400">
+                                  ({l.seedNumber})
+                                </span>
+                              )}{" "}
+                              <span className="text-zinc-500 dark:text-zinc-400">
+                                #{l.carNumber} {l.displayName}
+                              </span>{" "}
+                              <span className="font-mono tabular-nums text-zinc-400">
+                                {l.timeMs != null ? `${formatTime(l.timeMs)}s` : "—"}
+                              </span>
+                            </span>
+                          ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function RaceDay({
+  eventId,
+  laneCount,
+}: {
+  eventId: string;
+  laneCount: number;
+}) {
+  const [races, setRaces] = useState<Race[]>([]);
+  const [tournamentRaces, setTournamentRaces] = useState<Race[]>([]);
+  const [tournamentPhases, setTournamentPhases] = useState<TournamentPhaseInfo[]>([]);
+  const [qualifyingDivisions, setQualifyingDivisions] = useState<QualifyingDivision[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [resettingRaceId, setResettingRaceId] = useState<string | null>(null);
+  const [leaderboardKey, setLeaderboardKey] = useState(0);
+
+  async function handleRedoRace(raceId: string) {
+    if (!confirm("Reset this heat and re-run it?")) return;
+    setResettingRaceId(raceId);
+    try {
+      const res = await fetch(
+        `/api/events/${eventId}/races/${raceId}/reset`,
+        { method: "POST" }
+      );
+      const data = (await res.json()) as ActionResponse;
+      if (!res.ok) {
+        alert(data.error ?? "Failed to reset race");
+        return;
+      }
+      await loadRaces();
+    } catch {
+      alert("Failed to reset race");
+    } finally {
+      setResettingRaceId(null);
+    }
+  }
+
+  const loadRaces = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/events/${eventId}/races`);
+      const data = (await response.json()) as RacesResponse;
+      if (response.ok) {
+        setRaces(data.races ?? []);
+        setTournamentRaces(data.tournamentRaces ?? []);
+        setTournamentPhases(data.tournamentPhases ?? []);
+        setQualifyingDivisions(data.qualifyingDivisions ?? []);
+        setLeaderboardKey((k) => k + 1);
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setLoading(false);
+    }
+  }, [eventId]);
+
+  useEffect(() => {
+    void loadRaces();
+  }, [loadRaces]);
+
+  const pendingRaces = races.filter((r) => r.status === "pending");
+  const finishedRaces = races.filter((r) => r.status === "finished");
+
+  const currentRace = pendingRaces[0] ?? null;
+  const onDeckRace = pendingRaces[1] ?? null;
+  const inTheHoleRace = pendingRaces[2] ?? null;
+
+  const totalRaces = races.length;
+  const finishedCount = finishedRaces.length;
+
+  const qualifyingDivisionList = qualifyingDivisions;
+
+  if (loading) {
+    return <p className="text-sm text-zinc-500 dark:text-zinc-400">Loading races...</p>;
+  }
+
+  if (races.length === 0) {
+    return (
+      <div className="rounded-2xl border border-zinc-200 bg-white p-6 dark:border-zinc-800 dark:bg-zinc-950">
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          No heats generated yet. Complete registration first.
+        </p>
+      </div>
+    );
+  }
+
+  const allDone = pendingRaces.length === 0;
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between rounded-xl border border-zinc-200 bg-white px-5 py-3 dark:border-zinc-800 dark:bg-zinc-950">
+        <div>
+          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+            Progress
+          </p>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            {finishedCount} of {totalRaces} heats completed · {laneCount} lanes
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="h-2 w-32 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+            <div
+              className="h-full rounded-full bg-blue-600 transition-all duration-500"
+              style={{ width: `${totalRaces > 0 ? (finishedCount / totalRaces) * 100 : 0}%` }}
+            />
+          </div>
+          <span className="text-sm font-bold tabular-nums text-zinc-700 dark:text-zinc-300">
+            {totalRaces > 0 ? Math.round((finishedCount / totalRaces) * 100) : 0}%
+          </span>
+        </div>
+      </div>
+
+      {allDone ? (
+        <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-6 text-center dark:border-emerald-800 dark:bg-emerald-950">
+          <h2 className="text-xl font-semibold text-emerald-700 dark:text-emerald-300">
+            All Qualifying Heats Complete!
+          </h2>
+          <p className="mt-2 text-sm text-emerald-600 dark:text-emerald-400">
+            Start a tournament for each division below.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {currentRace && (
+            <RaceCard
+              key={currentRace.id}
+              race={currentRace}
+              role="current"
+              eventId={eventId}
+              onRaceFinished={() => void loadRaces()}
+            />
+          )}
+
+          {onDeckRace && (
+            <RaceCard
+              key={onDeckRace.id}
+              race={onDeckRace}
+              role="on_deck"
+              eventId={eventId}
+              onRaceFinished={() => void loadRaces()}
+            />
+          )}
+
+          {inTheHoleRace && (
+            <RaceCard
+              key={inTheHoleRace.id}
+              race={inTheHoleRace}
+              role="in_the_hole"
+              eventId={eventId}
+              onRaceFinished={() => void loadRaces()}
+            />
+          )}
+        </div>
+      )}
+
+      {finishedRaces.length > 0 && (
+        <Leaderboard eventId={eventId} refreshKey={leaderboardKey} />
+      )}
+
+      <TournamentSection
+        eventId={eventId}
+        tournamentRaces={tournamentRaces}
+        tournamentPhases={tournamentPhases}
+        qualifyingDivisionList={qualifyingDivisionList}
+        qualifyingDone={allDone}
+        onDataChanged={() => void loadRaces()}
+      />
+
+      {finishedRaces.length > 0 && (
+        <div>
+          <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+            Completed Heats
+          </h3>
+          <div className="space-y-2">
+            {finishedRaces.map((race) => (
+              <div
+                key={race.id}
+                className="rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-950"
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                      Heat {race.raceNumber}
+                    </p>
+                    <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                      {race.divisionName}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={resettingRaceId === race.id}
+                      onClick={() => void handleRedoRace(race.id)}
+                      className="rounded-lg border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                    >
+                      {resettingRaceId === race.id ? "Resetting..." : "Redo"}
+                    </button>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+                      Finished
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-2 flex gap-4">
+                  {race.lanes
+                    .sort((a, b) => (a.place ?? 99) - (b.place ?? 99))
+                    .map((lane) => (
+                      <div key={lane.laneNumber} className="text-xs">
+                        <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                          {lane.place === 1 ? "🏆" : `${lane.place}.`}
+                        </span>{" "}
+                        <span className="text-zinc-600 dark:text-zinc-400">
+                          #{lane.carNumber} {lane.displayName}
+                        </span>{" "}
+                        <span className="font-mono tabular-nums text-zinc-500 dark:text-zinc-400">
+                          {lane.timeMs != null ? formatTime(lane.timeMs) : "—"}s
+                        </span>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
