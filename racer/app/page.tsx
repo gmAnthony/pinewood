@@ -48,14 +48,15 @@ export default async function Home() {
               </p>
             ) : (
               publicEvents.map((event) => (
-                <article
+                <Link
                   key={event.id}
-                  className="rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900"
+                  href={`/events/${event.id}`}
+                  className="block rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 transition hover:border-zinc-300 hover:bg-white dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600 dark:hover:bg-zinc-800"
                 >
                   <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
                     {event.name}
                   </p>
-                </article>
+                </Link>
               ))
             )}
           </div>
