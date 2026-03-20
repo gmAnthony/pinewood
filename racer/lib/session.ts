@@ -1,6 +1,8 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { ensureAccountsTable, turso } from "@/lib/turso";
 
 type SessionPayload = {
+  accountId: number;
   email: string;
   exp: number;
 };
@@ -8,71 +10,66 @@ type SessionPayload = {
 export const SESSION_COOKIE_NAME = "racer_session";
 
 const SESSION_DURATION_SECONDS = 60 * 60 * 24 * 7; // 7 days
-const sessionSecret = process.env.AUTH_SESSION_SECRET;
 
-if (!sessionSecret) {
-  throw new Error("Missing AUTH_SESSION_SECRET environment variable.");
+export async function createSessionToken(accountId: number) {
+  await ensureAccountsTable();
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = Math.floor(Date.now() / 1000) + SESSION_DURATION_SECONDS;
+
+  await turso.execute({
+    sql: "INSERT INTO sessions (id, account_id, expires_at) VALUES (?, ?, ?)",
+    args: [token, accountId, expiresAt],
+  });
+
+  return token;
 }
 
-const sessionSecretValue: string = sessionSecret;
+export async function verifySessionToken(token: string) {
+  if (!token) {
+    return null;
+  }
 
-function encodeBase64Url(value: string) {
-  return Buffer.from(value, "utf8").toString("base64url");
-}
+  await ensureAccountsTable();
+  const result = await turso.execute({
+    sql: `SELECT s.account_id, s.expires_at, a.email
+          FROM sessions s
+          INNER JOIN accounts a ON a.id = s.account_id
+          WHERE s.id = ?
+          LIMIT 1`,
+    args: [token],
+  });
 
-function decodeBase64Url(value: string) {
-  return Buffer.from(value, "base64url").toString("utf8");
-}
+  if (result.rows.length === 0) {
+    return null;
+  }
 
-function createSignature(payload: string) {
-  return createHmac("sha256", sessionSecretValue).update(payload).digest("base64url");
-}
+  const row = result.rows[0];
+  const email = String(row.email ?? "");
+  const accountId = Number(row.account_id ?? 0);
+  const exp = Number(row.expires_at ?? 0);
 
-export function createSessionToken(email: string) {
-  const payload: SessionPayload = {
+  if (!email || !Number.isInteger(accountId) || accountId <= 0 || !Number.isFinite(exp)) {
+    return null;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  if (exp < now) {
+    await turso.execute({
+      sql: "DELETE FROM sessions WHERE id = ?",
+      args: [token],
+    });
+    return null;
+  }
+
+  const refreshedExp = now + SESSION_DURATION_SECONDS;
+  await turso.execute({
+    sql: "UPDATE sessions SET expires_at = ?, last_used_at = CURRENT_TIMESTAMP WHERE id = ?",
+    args: [refreshedExp, token],
+  });
+
+  return {
+    accountId,
     email,
-    exp: Math.floor(Date.now() / 1000) + SESSION_DURATION_SECONDS,
-  };
-
-  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
-  const signature = createSignature(encodedPayload);
-  return `${encodedPayload}.${signature}`;
-}
-
-export function verifySessionToken(token: string) {
-  const [encodedPayload, signature] = token.split(".");
-
-  if (!encodedPayload || !signature) {
-    return null;
-  }
-
-  const expected = createSignature(encodedPayload);
-  const incomingBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expected);
-
-  if (incomingBuffer.length !== expectedBuffer.length) {
-    return null;
-  }
-
-  if (!timingSafeEqual(incomingBuffer, expectedBuffer)) {
-    return null;
-  }
-
-  let payload: SessionPayload;
-
-  try {
-    payload = JSON.parse(decodeBase64Url(encodedPayload)) as SessionPayload;
-  } catch {
-    return null;
-  }
-
-  if (!payload.email || typeof payload.exp !== "number") {
-    return null;
-  }
-
-  if (payload.exp < Math.floor(Date.now() / 1000)) {
-    return null;
-  }
-
-  return payload;
+    exp: refreshedExp,
+  } satisfies SessionPayload;
 }

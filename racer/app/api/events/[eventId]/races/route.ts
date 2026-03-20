@@ -191,12 +191,17 @@ export async function GET(
       };
     });
 
-  const qualifyingDivisions = phasesResult.rows
-    .filter((r) => String(r.phase_type) === "qualifying")
-    .map((row) => ({
-      divisionId: String(row.division_id ?? ""),
+  const qualifyingDivisionsMap = new Map<string, { divisionId: string; divisionName: string }>();
+  for (const row of phasesResult.rows) {
+    if (String(row.phase_type) !== "qualifying") continue;
+    const divisionId = String(row.division_id ?? "");
+    if (!divisionId || qualifyingDivisionsMap.has(divisionId)) continue;
+    qualifyingDivisionsMap.set(divisionId, {
+      divisionId,
       divisionName: String(row.division_name ?? "Open"),
-    }));
+    });
+  }
+  const qualifyingDivisions = [...qualifyingDivisionsMap.values()];
 
   const allByeCarIds = tournamentPhases.flatMap((p) => p.byes.map((b) => b.carId));
   if (allByeCarIds.length > 0) {

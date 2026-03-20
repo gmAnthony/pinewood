@@ -96,5 +96,38 @@ export async function GET(
     return { divisionName: group.divisionName, entries };
   });
 
-  return NextResponse.json({ divisions });
+  const slowestResult = await turso.execute({
+    sql: `SELECT
+            ralr.time_ms,
+            c.car_number,
+            c.car_name,
+            rac.display_name,
+            d.name AS division_name
+          FROM race_attempt_lane_results ralr
+          JOIN race_attempts ra ON ra.id = ralr.attempt_id
+          JOIN races r ON r.id = ra.race_id
+          JOIN phases p ON p.id = r.phase_id
+          JOIN divisions d ON d.id = p.division_id
+          JOIN cars c ON c.id = ralr.car_id
+          JOIN racers rac ON rac.id = c.racer_id
+          WHERE p.event_id = ?
+            AND ra.attempt_status = 'official'
+            AND ralr.result_code = 'finished'
+            AND ralr.time_ms IS NOT NULL
+          ORDER BY ralr.time_ms DESC
+          LIMIT 1`,
+    args: [eventId],
+  });
+
+  const slowestNonDnf = slowestResult.rows[0]
+    ? {
+        timeMs: Number(slowestResult.rows[0].time_ms ?? 0),
+        carNumber: Number(slowestResult.rows[0].car_number ?? 0),
+        carName: String(slowestResult.rows[0].car_name ?? ""),
+        displayName: String(slowestResult.rows[0].display_name ?? ""),
+        divisionName: String(slowestResult.rows[0].division_name ?? "Open"),
+      }
+    : null;
+
+  return NextResponse.json({ divisions, slowestNonDnf });
 }

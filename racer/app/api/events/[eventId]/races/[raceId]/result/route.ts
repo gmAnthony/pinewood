@@ -5,6 +5,7 @@ import { ensureDatabaseSchema, turso } from "@/lib/turso";
 type LaneResult = {
   laneNumber: number;
   timeMs: number;
+  resultCode?: "finished" | "dnf";
 };
 
 type ResultBody = {
@@ -55,7 +56,18 @@ export async function POST(
     laneCarMap.set(Number(row.lane_number), String(row.car_id ?? ""));
   }
 
-  const sorted = [...body.laneResults].sort((a, b) => a.timeMs - b.timeMs);
+  const normalized = body.laneResults.map((lr) => ({
+    laneNumber: lr.laneNumber,
+    timeMs: lr.timeMs,
+    resultCode: lr.resultCode === "dnf" ? "dnf" : "finished",
+  }));
+
+  const sorted = [...normalized].sort((a, b) => {
+    const aFinished = a.resultCode === "finished";
+    const bFinished = b.resultCode === "finished";
+    if (aFinished !== bFinished) return aFinished ? -1 : 1;
+    return a.timeMs - b.timeMs;
+  });
 
   const existingAttempts = await turso.execute({
     sql: "SELECT COALESCE(MAX(attempt_number), 0) AS max_num FROM race_attempts WHERE race_id = ?",
@@ -79,8 +91,8 @@ export async function POST(
       await turso.execute({
         sql: `INSERT INTO race_attempt_lane_results
                 (id, attempt_id, lane_number, car_id, result_code, time_ms, place_in_attempt)
-              VALUES (?, ?, ?, ?, 'finished', ?, ?)`,
-        args: [randomUUID(), attemptId, lr.laneNumber, carId, lr.timeMs, i + 1],
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [randomUUID(), attemptId, lr.laneNumber, carId, lr.resultCode, lr.timeMs, i + 1],
       });
     }
 

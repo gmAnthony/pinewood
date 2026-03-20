@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useSerialGate, type SerialPacket } from "@/lib/serial-gate-context";
 
 type LaneInfo = {
   laneNumber: number;
@@ -72,7 +73,22 @@ type RacesResponse = {
   error?: string;
 };
 type ActionResponse = { message?: string; error?: string; tournamentDone?: boolean; roundComplete?: boolean };
-type LeaderboardResponse = { divisions?: LeaderboardDivision[]; error?: string };
+type SlowestNonDnf = {
+  timeMs: number;
+  carNumber: number;
+  carName: string;
+  displayName: string;
+  divisionName: string;
+};
+type LeaderboardResponse = {
+  divisions?: LeaderboardDivision[];
+  slowestNonDnf?: SlowestNonDnf | null;
+  error?: string;
+};
+type LaneCaptureResult = {
+  timeMs: number;
+  resultCode: "finished" | "dnf";
+};
 
 function formatTime(ms: number): string {
   const seconds = Math.floor(ms / 1000);
@@ -83,44 +99,22 @@ function formatTime(ms: number): string {
 function LaneTimer({
   lane,
   running,
-  startTime,
-  onFinish,
+  liveResult,
+  onToggleDnf,
 }: {
   lane: LaneInfo;
   running: boolean;
-  startTime: number | null;
-  onFinish: (laneNumber: number, timeMs: number) => void;
+  liveResult: LaneCaptureResult | null;
+  onToggleDnf?: () => void;
 }) {
-  const [elapsed, setElapsed] = useState(0);
-  const [finished, setFinished] = useState(false);
-  const rafRef = useRef<number>(0);
-
-  useEffect(() => {
-    if (!running || !startTime || finished) return;
-
-    function tick() {
-      setElapsed(Date.now() - startTime!);
-      rafRef.current = requestAnimationFrame(tick);
-    }
-    rafRef.current = requestAnimationFrame(tick);
-
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [running, startTime, finished]);
-
-  function handleFinish() {
-    if (!startTime) return;
-    const finalTime = Date.now() - startTime;
-    setElapsed(finalTime);
-    setFinished(true);
-    cancelAnimationFrame(rafRef.current);
-    onFinish(lane.laneNumber, finalTime);
-  }
-
-  const displayTime = lane.timeMs != null ? lane.timeMs : running || finished ? elapsed : 0;
+  const resultCode = lane.resultCode ?? liveResult?.resultCode ?? null;
+  const hasResult = lane.timeMs != null || liveResult != null;
+  const displayTime = lane.timeMs ?? liveResult?.timeMs ?? 0;
+  const isDnf = resultCode === "dnf";
 
   return (
     <div className={`flex items-center gap-4 rounded-xl border px-4 py-3 ${
-      finished || lane.timeMs != null
+      hasResult
         ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950"
         : running
           ? "border-blue-300 bg-blue-50 dark:border-blue-800 dark:bg-blue-950"
@@ -148,6 +142,9 @@ function LaneTimer({
         <p className="font-mono text-xl font-bold tabular-nums text-zinc-900 dark:text-zinc-100">
           {formatTime(displayTime)}
         </p>
+        {isDnf && (
+          <p className="text-xs font-semibold text-rose-600 dark:text-rose-400">DNF</p>
+        )}
         {lane.place != null && (
           <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
             {lane.place === 1 ? "1st" : lane.place === 2 ? "2nd" : `${lane.place}th`}
@@ -155,21 +152,31 @@ function LaneTimer({
         )}
       </div>
 
-      {running && !finished && lane.timeMs == null && (
+      {running && liveResult && onToggleDnf && (
         <button
           type="button"
-          onClick={handleFinish}
-          className="shrink-0 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-500"
+          onClick={onToggleDnf}
+          className={`shrink-0 rounded-lg px-3 py-2 text-xs font-medium transition ${
+            isDnf
+              ? "border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              : "bg-rose-600 text-white hover:bg-rose-500"
+          }`}
         >
-          Finish
+          {isDnf ? "Undo DNF" : "Mark DNF"}
         </button>
       )}
 
-      {(finished || lane.timeMs != null) && (
-        <span className="shrink-0 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-          Done
+      {hasResult ? (
+        <span className={`shrink-0 text-xs font-medium ${
+          isDnf ? "text-rose-600 dark:text-rose-400" : "text-emerald-600 dark:text-emerald-400"
+        }`}>
+          {isDnf ? "DNF" : "Done"}
         </span>
-      )}
+      ) : running ? (
+        <span className="shrink-0 text-xs font-medium text-blue-600 dark:text-blue-400">
+          Waiting
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -179,16 +186,20 @@ function RaceCard({
   role,
   eventId,
   onRaceFinished,
+  serialPacket,
+  gateConnected,
 }: {
   race: Race;
   role: "current" | "on_deck" | "in_the_hole" | "finished" | "upcoming";
   eventId: string;
   onRaceFinished: () => void;
+  serialPacket: SerialPacket | null;
+  gateConnected: boolean;
 }) {
   const [running, setRunning] = useState(false);
-  const [startTime, setStartTime] = useState<number | null>(null);
-  const [laneResults, setLaneResults] = useState<Map<number, number>>(new Map());
+  const [laneResults, setLaneResults] = useState<Map<number, LaneCaptureResult>>(new Map());
   const [submitting, setSubmitting] = useState(false);
+  const [armedAtSequence, setArmedAtSequence] = useState(0);
 
   const allLanesFinished = race.lanes.every(
     (l) => l.timeMs != null || laneResults.has(l.laneNumber)
@@ -198,55 +209,75 @@ function RaceCard({
 
   function handleStart() {
     setRunning(true);
-    setStartTime(Date.now());
     setLaneResults(new Map());
-  }
-
-  function handleLaneFinish(laneNumber: number, timeMs: number) {
-    setLaneResults((prev) => {
-      const next = new Map(prev);
-      next.set(laneNumber, timeMs);
-      return next;
-    });
+    setArmedAtSequence(serialPacket?.sequence ?? 0);
   }
 
   useEffect(() => {
-    if (!running || !allLanesFinished || submitting || isAlreadyFinished) return;
+    if (!serialPacket || role !== "current" || !running || isAlreadyFinished) return;
+    if (serialPacket.sequence <= armedAtSequence) return;
 
-    async function submitResults() {
-      setSubmitting(true);
-      try {
-        const results = race.lanes.map((l) => ({
-          laneNumber: l.laneNumber,
-          timeMs: laneResults.get(l.laneNumber) ?? 0,
-        }));
-
-        const response = await fetch(
-          `/api/events/${eventId}/races/${race.id}/result`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ laneResults: results }),
-          }
-        );
-
-        const data = (await response.json()) as ActionResponse;
-        if (!response.ok) {
-          console.error(data.error);
-          return;
-        }
-
-        setRunning(false);
-        onRaceFinished();
-      } catch {
-        console.error("Failed to submit results");
-      } finally {
-        setSubmitting(false);
+    setLaneResults((prev) => {
+      const next = new Map(prev);
+      for (const lane of race.lanes) {
+        const serialTimeMs = serialPacket.laneTimesMs[lane.laneNumber];
+        if (serialTimeMs == null || next.has(lane.laneNumber)) continue;
+        next.set(lane.laneNumber, { timeMs: serialTimeMs, resultCode: "finished" });
       }
-    }
+      return next;
+    });
+  }, [serialPacket, role, running, isAlreadyFinished, race.lanes, armedAtSequence]);
 
-    void submitResults();
-  }, [allLanesFinished, running, submitting, isAlreadyFinished, laneResults, race, eventId, onRaceFinished]);
+  async function handleConfirmResults() {
+    if (!running || !allLanesFinished || submitting || isAlreadyFinished) return;
+    setSubmitting(true);
+    try {
+      const results = race.lanes.map((l) => ({
+        laneNumber: l.laneNumber,
+        timeMs: laneResults.get(l.laneNumber)?.timeMs ?? 0,
+        resultCode: laneResults.get(l.laneNumber)?.resultCode ?? "finished",
+      }));
+
+      const response = await fetch(
+        `/api/events/${eventId}/races/${race.id}/result`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ laneResults: results }),
+        }
+      );
+
+      const data = (await response.json()) as ActionResponse;
+      if (!response.ok) {
+        console.error(data.error);
+        return;
+      }
+
+      setRunning(false);
+      onRaceFinished();
+    } catch {
+      console.error("Failed to submit results");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleRedoCapture() {
+    setLaneResults(new Map());
+  }
+
+  function handleToggleDnf(laneNumber: number) {
+    setLaneResults((prev) => {
+      const existing = prev.get(laneNumber);
+      if (!existing) return prev;
+      const next = new Map(prev);
+      next.set(laneNumber, {
+        ...existing,
+        resultCode: existing.resultCode === "dnf" ? "finished" : "dnf",
+      });
+      return next;
+    });
+  }
 
   const roleLabels: Record<string, { text: string; color: string }> = {
     current: { text: "Current Race", color: "bg-blue-600 text-white" },
@@ -277,20 +308,44 @@ function RaceCard({
           </span>
         </div>
 
-        {role === "current" && !running && !isAlreadyFinished && (
-          <button
-            type="button"
-            onClick={handleStart}
-            className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500"
-          >
-            Start Race
-          </button>
-        )}
-
-        {submitting && (
-          <span className="text-sm text-zinc-500 dark:text-zinc-400">Saving results...</span>
-        )}
+        <div className="flex items-center gap-2">
+          {role === "current" && !running && !isAlreadyFinished && (
+            <button
+              type="button"
+              onClick={handleStart}
+              disabled={!gateConnected}
+              className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+            >
+              Start Race
+            </button>
+          )}
+          {role === "current" && running && !isAlreadyFinished && (
+            <>
+              <button
+                type="button"
+                onClick={handleRedoCapture}
+                className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              >
+                Redo Capture
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmResults()}
+                disabled={!allLanesFinished || submitting}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {submitting ? "Saving..." : "Confirm Results"}
+              </button>
+            </>
+          )}
+        </div>
       </div>
+
+      {role === "current" && running && !isAlreadyFinished && (
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+          Listening for finish-gate response. Use Redo Capture to clear received lane times before confirming.
+        </p>
+      )}
 
       <div className="mt-3 space-y-2">
         {race.lanes.map((lane) => (
@@ -298,8 +353,12 @@ function RaceCard({
             key={lane.laneNumber}
             lane={lane}
             running={running && role === "current"}
-            startTime={startTime}
-            onFinish={handleLaneFinish}
+            liveResult={laneResults.get(lane.laneNumber) ?? null}
+            onToggleDnf={
+              running && role === "current"
+                ? () => handleToggleDnf(lane.laneNumber)
+                : undefined
+            }
           />
         ))}
       </div>
@@ -321,6 +380,7 @@ function Leaderboard({
   refreshKey: number;
 }) {
   const [divisions, setDivisions] = useState<LeaderboardDivision[]>([]);
+  const [slowestNonDnf, setSlowestNonDnf] = useState<SlowestNonDnf | null>(null);
   const [open, setOpen] = useState(true);
 
   useEffect(() => {
@@ -328,7 +388,10 @@ function Leaderboard({
       try {
         const res = await fetch(`/api/events/${eventId}/leaderboard`);
         const data = (await res.json()) as LeaderboardResponse;
-        if (res.ok && data.divisions) setDivisions(data.divisions);
+        if (res.ok) {
+          if (data.divisions) setDivisions(data.divisions);
+          setSlowestNonDnf(data.slowestNonDnf ?? null);
+        }
       } catch {
         /* ignore */
       }
@@ -336,11 +399,13 @@ function Leaderboard({
     void load();
   }, [eventId, refreshKey]);
 
-  if (divisions.length === 0 || divisions.every((d) => d.entries.length === 0)) {
+  if ((divisions.length === 0 || divisions.every((d) => d.entries.length === 0)) && !slowestNonDnf) {
     return null;
   }
 
-  const maxHeats = Math.max(...divisions.flatMap((d) => d.entries.map((e) => e.heats.length)));
+  const maxHeats = divisions.length > 0
+    ? Math.max(...divisions.flatMap((d) => d.entries.map((e) => e.heats.length)))
+    : 0;
 
   return (
     <div>
@@ -362,6 +427,21 @@ function Leaderboard({
           <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
         </svg>
       </button>
+
+      {slowestNonDnf && (
+        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+          <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+            Slowest Non-DNF
+          </p>
+          <p className="mt-1 text-sm font-medium text-amber-800 dark:text-amber-200">
+            #{slowestNonDnf.carNumber} {slowestNonDnf.displayName} ({slowestNonDnf.carName}) ·{" "}
+            {formatTime(slowestNonDnf.timeMs)}s
+          </p>
+          <p className="text-xs text-amber-700/80 dark:text-amber-300/80">
+            Division: {slowestNonDnf.divisionName}
+          </p>
+        </div>
+      )}
 
       {open &&
         divisions.map((division) => (
@@ -460,23 +540,107 @@ function Leaderboard({
   );
 }
 
+function TournamentBracket({
+  races,
+}: {
+  races: Race[];
+}) {
+  if (races.length === 0) return null;
+
+  const rounds = [...new Set(races.map((r) => r.roundNumber ?? 1))].sort((a, b) => a - b);
+  const racesByRound = new Map<number, Race[]>();
+  for (const round of rounds) {
+    racesByRound.set(
+      round,
+      races
+        .filter((r) => (r.roundNumber ?? 1) === round)
+        .sort((a, b) => (a.groupNumber ?? 0) - (b.groupNumber ?? 0))
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="flex min-w-max items-start gap-4">
+        {rounds.map((round) => (
+          <div key={round} className="w-72 shrink-0 space-y-2">
+            <h5 className="px-1 text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+              Round {round}
+            </h5>
+            {(racesByRound.get(round) ?? []).map((race) => (
+              <div
+                key={race.id}
+                className={`rounded-lg border bg-white p-2 dark:bg-zinc-950 ${
+                  race.status === "finished"
+                    ? "border-emerald-300 dark:border-emerald-800"
+                    : race.status === "pending"
+                      ? "border-purple-300 dark:border-purple-800"
+                      : "border-zinc-200 dark:border-zinc-800"
+                }`}
+              >
+                <p className="mb-1 text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                  Match {race.groupNumber}
+                </p>
+                <div className="space-y-1">
+                  {race.lanes
+                    .slice()
+                    .sort((a, b) => a.laneNumber - b.laneNumber)
+                    .map((lane) => {
+                      const isWinner = lane.place === 1;
+                      return (
+                        <div
+                          key={`${race.id}-${lane.laneNumber}`}
+                          className={`rounded-md border px-2 py-1 text-xs ${
+                            isWinner
+                              ? "border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/40"
+                              : "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900"
+                          }`}
+                        >
+                          <p className="font-medium text-zinc-800 dark:text-zinc-200">
+                            {lane.seedNumber != null ? `(${lane.seedNumber}) ` : ""}#{lane.carNumber} {lane.displayName}
+                          </p>
+                          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                            Lane {lane.laneNumber}
+                            {lane.timeMs != null
+                              ? lane.resultCode === "dnf"
+                                ? ` · ${formatTime(lane.timeMs)}s · DNF`
+                                : ` · ${formatTime(lane.timeMs)}s`
+                              : ""}
+                            {isWinner ? " · Winner" : ""}
+                          </p>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function TournamentRaceCard({
   race,
   isCurrent,
   eventId,
   onRaceFinished,
+  serialPacket,
+  gateConnected,
 }: {
   race: Race;
   isCurrent: boolean;
   eventId: string;
   onRaceFinished: () => void;
+  serialPacket: SerialPacket | null;
+  gateConnected: boolean;
 }) {
   const [lanes, setLanes] = useState(race.lanes);
   const [swapping, setSwapping] = useState(false);
   const [running, setRunning] = useState(false);
-  const [startTime, setStartTime] = useState<number | null>(null);
-  const [laneResults, setLaneResults] = useState<Map<number, number>>(new Map());
+  const [laneResults, setLaneResults] = useState<Map<number, LaneCaptureResult>>(new Map());
   const [submitting, setSubmitting] = useState(false);
+  const [armedAtSequence, setArmedAtSequence] = useState(0);
 
   const isFinished = race.status === "finished";
   const allLanesFinished = lanes.every(
@@ -514,49 +678,69 @@ function TournamentRaceCard({
 
   function handleStart() {
     setRunning(true);
-    setStartTime(Date.now());
     setLaneResults(new Map());
-  }
-
-  function handleLaneFinish(laneNumber: number, timeMs: number) {
-    setLaneResults((prev) => {
-      const next = new Map(prev);
-      next.set(laneNumber, timeMs);
-      return next;
-    });
+    setArmedAtSequence(serialPacket?.sequence ?? 0);
   }
 
   useEffect(() => {
-    if (!running || !allLanesFinished || submitting || isFinished) return;
+    if (!serialPacket || !isCurrent || !running || isFinished) return;
+    if (serialPacket.sequence <= armedAtSequence) return;
 
-    async function submitResults() {
-      setSubmitting(true);
-      try {
-        const results = lanes.map((l) => ({
-          laneNumber: l.laneNumber,
-          timeMs: laneResults.get(l.laneNumber) ?? 0,
-        }));
-        const response = await fetch(
-          `/api/events/${eventId}/races/${race.id}/result`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ laneResults: results }),
-          }
-        );
-        if (response.ok) {
-          setRunning(false);
-          onRaceFinished();
-        }
-      } catch {
-        /* ignore */
-      } finally {
-        setSubmitting(false);
+    setLaneResults((prev) => {
+      const next = new Map(prev);
+      for (const lane of lanes) {
+        const serialTimeMs = serialPacket.laneTimesMs[lane.laneNumber];
+        if (serialTimeMs == null || next.has(lane.laneNumber)) continue;
+        next.set(lane.laneNumber, { timeMs: serialTimeMs, resultCode: "finished" });
       }
-    }
+      return next;
+    });
+  }, [serialPacket, isCurrent, running, isFinished, lanes, armedAtSequence]);
 
-    void submitResults();
-  }, [allLanesFinished, running, submitting, isFinished, laneResults, lanes, race, eventId, onRaceFinished]);
+  async function handleConfirmResults() {
+    if (!running || !allLanesFinished || submitting || isFinished) return;
+    setSubmitting(true);
+    try {
+      const results = lanes.map((l) => ({
+        laneNumber: l.laneNumber,
+        timeMs: laneResults.get(l.laneNumber)?.timeMs ?? 0,
+        resultCode: laneResults.get(l.laneNumber)?.resultCode ?? "finished",
+      }));
+      const response = await fetch(
+        `/api/events/${eventId}/races/${race.id}/result`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ laneResults: results }),
+        }
+      );
+      if (response.ok) {
+        setRunning(false);
+        onRaceFinished();
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleRedoCapture() {
+    setLaneResults(new Map());
+  }
+
+  function handleToggleDnf(laneNumber: number) {
+    setLaneResults((prev) => {
+      const existing = prev.get(laneNumber);
+      if (!existing) return prev;
+      const next = new Map(prev);
+      next.set(laneNumber, {
+        ...existing,
+        resultCode: existing.resultCode === "dnf" ? "finished" : "dnf",
+      });
+      return next;
+    });
+  }
 
   return (
     <div
@@ -597,9 +781,29 @@ function TournamentRaceCard({
               <button
                 type="button"
                 onClick={handleStart}
-                className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-500"
+                disabled={!gateConnected}
+                className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
               >
                 Start Race
+              </button>
+            </>
+          )}
+          {isCurrent && running && !isFinished && (
+            <>
+              <button
+                type="button"
+                onClick={handleRedoCapture}
+                className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+              >
+                Redo Capture
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmResults()}
+                disabled={!allLanesFinished || submitting}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {submitting ? "Saving..." : "Confirm Results"}
               </button>
             </>
           )}
@@ -609,14 +813,24 @@ function TournamentRaceCard({
         </div>
       </div>
 
+      {isCurrent && running && !isFinished && (
+        <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+          Listening for finish-gate response. Use Redo Capture to clear received lane times before confirming.
+        </p>
+      )}
+
       <div className="mt-3 space-y-2">
         {lanes.map((lane) => (
           <LaneTimer
             key={`${race.id}-${lane.laneNumber}`}
             lane={lane}
             running={running && isCurrent}
-            startTime={startTime}
-            onFinish={handleLaneFinish}
+            liveResult={laneResults.get(lane.laneNumber) ?? null}
+            onToggleDnf={
+              running && isCurrent
+                ? () => handleToggleDnf(lane.laneNumber)
+                : undefined
+            }
           />
         ))}
       </div>
@@ -631,6 +845,8 @@ function TournamentSection({
   qualifyingDivisionList,
   qualifyingDone,
   onDataChanged,
+  serialPacket,
+  gateConnected,
 }: {
   eventId: string;
   tournamentRaces: Race[];
@@ -638,13 +854,20 @@ function TournamentSection({
   qualifyingDivisionList: QualifyingDivision[];
   qualifyingDone: boolean;
   onDataChanged: () => void;
+  serialPacket: SerialPacket | null;
+  gateConnected: boolean;
 }) {
   const [startingDivId, setStartingDivId] = useState<string | null>(null);
   const [advancingPhaseId, setAdvancingPhaseId] = useState<string | null>(null);
+  const [resettingDivId, setResettingDivId] = useState<string | null>(null);
 
   const startedDivisionIds = new Set(tournamentPhases.map((p) => p.divisionId));
 
-  const unstartedDivisions = qualifyingDivisionList.filter(
+  const uniqueQualifyingDivisions = [...new Map(
+    qualifyingDivisionList.map((d) => [d.divisionId, d] as const)
+  ).values()];
+
+  const unstartedDivisions = uniqueQualifyingDivisions.filter(
     (d) => !startedDivisionIds.has(d.divisionId)
   );
 
@@ -690,6 +913,27 @@ function TournamentSection({
       alert("Failed to advance tournament");
     } finally {
       setAdvancingPhaseId(null);
+    }
+  }
+
+  async function handleResetTournament(divisionId: string) {
+    if (!confirm("Reset this division tournament and start over from Round 1?")) return;
+    setResettingDivId(divisionId);
+    try {
+      const res = await fetch(
+        `/api/events/${eventId}/divisions/${divisionId}/reset-tournament`,
+        { method: "POST" }
+      );
+      const data = (await res.json()) as ActionResponse;
+      if (!res.ok) {
+        alert(data.error ?? "Failed to reset tournament");
+        return;
+      }
+      onDataChanged();
+    } catch {
+      alert("Failed to reset tournament");
+    } finally {
+      setResettingDivId(null);
     }
   }
 
@@ -762,10 +1006,22 @@ function TournamentSection({
               <h4 className="text-sm font-semibold text-purple-800 dark:text-purple-300">
                 {phase.divisionName} — Tournament
               </h4>
-              <span className="text-xs text-purple-600 dark:text-purple-400">
-                Round {currentRound} · {currentRoundRaces.length} match
-                {currentRoundRaces.length !== 1 ? "es" : ""}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-purple-600 dark:text-purple-400">
+                  Round {currentRound} · {currentRoundRaces.length} match
+                  {currentRoundRaces.length !== 1 ? "es" : ""}
+                </span>
+                {isChampionshipDecided && (
+                  <button
+                    type="button"
+                    disabled={resettingDivId === phase.divisionId}
+                    onClick={() => void handleResetTournament(phase.divisionId)}
+                    className="rounded-lg border border-purple-300 bg-white px-3 py-1 text-xs font-medium text-purple-700 transition hover:bg-purple-100 disabled:opacity-50 dark:border-purple-700 dark:bg-purple-900/20 dark:text-purple-300 dark:hover:bg-purple-900/40"
+                  >
+                    {resettingDivId === phase.divisionId ? "Resetting..." : "Reset Tournament"}
+                  </button>
+                )}
+              </div>
             </div>
 
             {champion && (
@@ -806,6 +1062,13 @@ function TournamentSection({
               </div>
             )}
 
+            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                Bracket
+              </p>
+              <TournamentBracket races={phaseRaces} />
+            </div>
+
             <div className="space-y-3 p-4">
               {currentRoundRaces.map((race) => (
                 <TournamentRaceCard
@@ -814,6 +1077,8 @@ function TournamentSection({
                   isCurrent={currentMatch?.id === race.id}
                   eventId={eventId}
                   onRaceFinished={onDataChanged}
+                  serialPacket={serialPacket}
+                  gateConnected={gateConnected}
                 />
               ))}
 
@@ -864,7 +1129,11 @@ function TournamentSection({
                                 #{l.carNumber} {l.displayName}
                               </span>{" "}
                               <span className="font-mono tabular-nums text-zinc-400">
-                                {l.timeMs != null ? `${formatTime(l.timeMs)}s` : "—"}
+                                {l.timeMs != null
+                                  ? l.resultCode === "dnf"
+                                    ? `${formatTime(l.timeMs)}s (DNF)`
+                                    : `${formatTime(l.timeMs)}s`
+                                  : "—"}
                               </span>
                             </span>
                           ))}
@@ -895,6 +1164,7 @@ export function RaceDay({
   const [loading, setLoading] = useState(true);
   const [resettingRaceId, setResettingRaceId] = useState<string | null>(null);
   const [leaderboardKey, setLeaderboardKey] = useState(0);
+  const { serialPacket, serialConnected } = useSerialGate();
 
   async function handleRedoRace(raceId: string) {
     if (!confirm("Reset this heat and re-run it?")) return;
@@ -991,6 +1261,17 @@ export function RaceDay({
         </div>
       </div>
 
+      {!serialConnected && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-5 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+          <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+            Finish gate disconnected
+          </p>
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            Reconnect from the bottom bar before starting the next race.
+          </p>
+        </div>
+      )}
+
       {allDone ? (
         <div className="rounded-2xl border border-emerald-300 bg-emerald-50 p-6 text-center dark:border-emerald-800 dark:bg-emerald-950">
           <h2 className="text-xl font-semibold text-emerald-700 dark:text-emerald-300">
@@ -1009,6 +1290,8 @@ export function RaceDay({
               role="current"
               eventId={eventId}
               onRaceFinished={() => void loadRaces()}
+              serialPacket={serialPacket}
+              gateConnected={serialConnected}
             />
           )}
 
@@ -1019,6 +1302,8 @@ export function RaceDay({
               role="on_deck"
               eventId={eventId}
               onRaceFinished={() => void loadRaces()}
+              serialPacket={serialPacket}
+              gateConnected={serialConnected}
             />
           )}
 
@@ -1029,6 +1314,8 @@ export function RaceDay({
               role="in_the_hole"
               eventId={eventId}
               onRaceFinished={() => void loadRaces()}
+              serialPacket={serialPacket}
+              gateConnected={serialConnected}
             />
           )}
         </div>
@@ -1045,6 +1332,8 @@ export function RaceDay({
         qualifyingDivisionList={qualifyingDivisionList}
         qualifyingDone={allDone}
         onDataChanged={() => void loadRaces()}
+        serialPacket={serialPacket}
+        gateConnected={serialConnected}
       />
 
       {finishedRaces.length > 0 && (
@@ -1093,7 +1382,11 @@ export function RaceDay({
                           #{lane.carNumber} {lane.displayName}
                         </span>{" "}
                         <span className="font-mono tabular-nums text-zinc-500 dark:text-zinc-400">
-                          {lane.timeMs != null ? formatTime(lane.timeMs) : "—"}s
+                          {lane.timeMs != null
+                            ? lane.resultCode === "dnf"
+                              ? `${formatTime(lane.timeMs)} (DNF)`
+                              : `${formatTime(lane.timeMs)}s`
+                            : "—"}
                         </span>
                       </div>
                     ))}

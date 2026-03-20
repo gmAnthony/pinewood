@@ -19,6 +19,13 @@ const schemaStatements: string[] = [
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS events (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -230,6 +237,8 @@ const schemaStatements: string[] = [
     ON timer_logs(timer_session_id, received_at DESC)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_logs_event_time
     ON audit_logs(event_id, created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_account_expires
+    ON sessions(account_id, expires_at DESC)`,
 ];
 
 let initialized = false;

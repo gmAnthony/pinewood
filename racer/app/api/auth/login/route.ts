@@ -38,10 +38,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid email or password." }, { status: 401 });
   }
 
-  const sessionToken = createSessionToken(email);
+  const accountId = Number(account.id ?? 0);
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    return NextResponse.json({ error: "Invalid account record." }, { status: 500 });
+  }
+
+  const sessionToken = await createSessionToken(accountId);
   const response = NextResponse.json({
     message: "Login successful.",
-    accountId: account.id,
+    accountId,
     redirectTo: "/account",
   });
 
