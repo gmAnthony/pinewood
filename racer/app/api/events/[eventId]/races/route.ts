@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { ensureDatabaseSchema, turso } from "@/lib/turso";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(
   _request: Request,
   context: { params: Promise<{ eventId: string }> }
@@ -81,16 +84,17 @@ export async function GET(
 
   const resultsResult = await turso.execute({
     sql: `SELECT
-            ra.race_id,
+            r.id AS race_id,
+            ra.captured_at,
             ralr.lane_number,
             ralr.time_ms,
             ralr.result_code,
             ralr.place_in_attempt
-          FROM race_attempts ra
+          FROM races r
+          JOIN race_attempts ra ON ra.id = r.official_attempt_id
           JOIN race_attempt_lane_results ralr ON ralr.attempt_id = ra.id
-          WHERE ra.race_id IN (${racePlaceholders})
-            AND ra.attempt_status = 'official'
-          ORDER BY ralr.lane_number ASC`,
+          WHERE r.id IN (${racePlaceholders})
+          ORDER BY r.id ASC, ralr.lane_number ASC`,
     args: raceIds,
   });
 
@@ -107,6 +111,7 @@ export async function GET(
   };
 
   const lanesByRace = new Map<string, LaneInfo[]>();
+  const officialCapturedAtByRace = new Map<string, string>();
   for (const row of lanesResult.rows) {
     const raceId = String(row.race_id);
     if (!lanesByRace.has(raceId)) lanesByRace.set(raceId, []);
@@ -125,6 +130,9 @@ export async function GET(
 
   for (const row of resultsResult.rows) {
     const raceId = String(row.race_id);
+    if (!officialCapturedAtByRace.has(raceId) && row.captured_at != null) {
+      officialCapturedAtByRace.set(raceId, String(row.captured_at));
+    }
     const laneNum = Number(row.lane_number);
     const lanes = lanesByRace.get(raceId);
     if (!lanes) continue;
@@ -148,6 +156,7 @@ export async function GET(
       phaseType: info?.phaseType ?? "qualifying",
       roundNumber: row.round_number != null ? Number(row.round_number) : null,
       groupNumber: row.group_number != null ? Number(row.group_number) : null,
+      officialCapturedAt: officialCapturedAtByRace.get(String(row.id)) ?? null,
       lanes: lanesByRace.get(String(row.id)) ?? [],
     };
   });
@@ -234,10 +243,19 @@ export async function GET(
     }
   }
 
-  return NextResponse.json({
-    races: qualifyingRaces,
-    tournamentRaces,
-    tournamentPhases,
-    qualifyingDivisions,
-  });
+  return NextResponse.json(
+    {
+      races: qualifyingRaces,
+      tournamentRaces,
+      tournamentPhases,
+      qualifyingDivisions,
+    },
+    {
+      headers: {
+        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      },
+    }
+  );
 }

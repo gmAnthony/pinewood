@@ -26,6 +26,8 @@ type Registration = {
   divisionName: string;
   inspectionStatus: string;
   inspectionProgress: InspectionProgress;
+  paymentAmount: number;
+  paymentStatus: string;
 };
 
 type RegisterResponse = { message?: string; error?: string };
@@ -71,6 +73,29 @@ function InspectionBadge({ status, progress }: { status: string; progress: Inspe
   );
 }
 
+function PaymentBadge({ amount, status }: { amount: number; status: string }) {
+  const label = amount === 0 ? "Free" : `$${amount}`;
+  if (status === "paid") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300">
+        {label} Paid
+      </span>
+    );
+  }
+  if (amount === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+        Free
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900 dark:text-amber-300">
+      {label} Unpaid
+    </span>
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   if (status === "scratched") {
     return (
@@ -94,6 +119,8 @@ export function RegistrationForm({
   const [age, setAge] = useState("");
   const [carName, setCarName] = useState("");
   const [divisionId, setDivisionId] = useState(divisions[0]?.id ?? "");
+  const [paymentAmount, setPaymentAmount] = useState<number>(10);
+  const [paymentStatus, setPaymentStatus] = useState<"paid" | "pay_later">("pay_later");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<"success" | "error">("success");
@@ -140,6 +167,8 @@ export function RegistrationForm({
           age: age ? Number(age) : null,
           carName,
           divisionId,
+          paymentAmount,
+          paymentStatus,
         }),
       });
       const data = (await response.json()) as RegisterResponse;
@@ -154,6 +183,8 @@ export function RegistrationForm({
       setLastName("");
       setAge("");
       setCarName("");
+      setPaymentAmount(10);
+      setPaymentStatus("pay_later");
       void loadRegistrations();
     } catch {
       setMessage("Unable to reach server.");
@@ -306,6 +337,59 @@ export function RegistrationForm({
           <input id="carName" value={carName} onChange={(e) => setCarName(e.target.value)} required placeholder="e.g. Lightning Bolt" className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none ring-zinc-300 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100" />
         </div>
 
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+              Amount Owed
+            </label>
+            <div className="flex gap-2">
+              {[10, 5, 0].map((amt) => (
+                <button
+                  key={amt}
+                  type="button"
+                  onClick={() => setPaymentAmount(amt)}
+                  className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                    paymentAmount === amt
+                      ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+                      : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  }`}
+                >
+                  {amt === 0 ? "Free" : `$${amt}`}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-zinc-700 dark:text-zinc-300">
+              Payment Status
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setPaymentStatus("paid")}
+                className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                  paymentStatus === "paid"
+                    ? "border-emerald-600 bg-emerald-600 text-white dark:border-emerald-500 dark:bg-emerald-600"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                }`}
+              >
+                Paid
+              </button>
+              <button
+                type="button"
+                onClick={() => setPaymentStatus("pay_later")}
+                className={`flex-1 rounded-lg border px-3 py-2 text-sm font-medium transition ${
+                  paymentStatus === "pay_later"
+                    ? "border-amber-600 bg-amber-600 text-white dark:border-amber-500 dark:bg-amber-600"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                }`}
+              >
+                Pay Later
+              </button>
+            </div>
+          </div>
+        </div>
+
         <button type="submit" disabled={submitting} className="w-full rounded-lg bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-70 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
           {submitting ? "Registering..." : "Register Racer"}
         </button>
@@ -357,6 +441,7 @@ export function RegistrationForm({
                         </p>
                       </div>
 
+                      <PaymentBadge amount={reg.paymentAmount} status={reg.paymentStatus} />
                       <InspectionBadge status={reg.inspectionStatus} progress={reg.inspectionProgress} />
 
                       <div className="flex shrink-0 gap-1">

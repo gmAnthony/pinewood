@@ -8,6 +8,7 @@ type EventSummary = {
   name: string;
   status: string;
   isPublic: boolean;
+  trackLengthFt: number | null;
   createdAt: string;
   divisionCount: number;
 };
@@ -29,11 +30,12 @@ export async function GET() {
       e.name,
       e.status,
       e.is_public,
+      e.track_length_ft,
       e.created_at,
       COUNT(d.id) AS division_count
      FROM events e
      LEFT JOIN divisions d ON d.event_id = e.id
-     GROUP BY e.id, e.name, e.status, e.is_public, e.created_at
+     GROUP BY e.id, e.name, e.status, e.is_public, e.track_length_ft, e.created_at
      ORDER BY e.created_at DESC
      LIMIT 100`
   );
@@ -43,6 +45,7 @@ export async function GET() {
     name: String(row.name ?? ""),
     status: String(row.status ?? "setup"),
     isPublic: Number(row.is_public ?? 0) === 1,
+    trackLengthFt: row.track_length_ft != null ? Number(row.track_length_ft) : null,
     createdAt: String(row.created_at ?? ""),
     divisionCount: Number(row.division_count ?? 0),
   }));

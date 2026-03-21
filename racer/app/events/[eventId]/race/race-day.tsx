@@ -91,9 +91,7 @@ type LaneCaptureResult = {
 };
 
 function formatTime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const hundredths = Math.floor((ms % 1000) / 10);
-  return `${seconds}.${String(hundredths).padStart(2, "0")}`;
+  return (ms / 1000).toFixed(2);
 }
 
 function LaneTimer({
@@ -196,21 +194,44 @@ function RaceCard({
   serialPacket: SerialPacket | null;
   gateConnected: boolean;
 }) {
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState(race.status === "running");
+  const [starting, setStarting] = useState(false);
   const [laneResults, setLaneResults] = useState<Map<number, LaneCaptureResult>>(new Map());
   const [submitting, setSubmitting] = useState(false);
   const [armedAtSequence, setArmedAtSequence] = useState(0);
 
-  const allLanesFinished = race.lanes.every(
-    (l) => l.timeMs != null || laneResults.has(l.laneNumber)
-  );
+  const allLanesFinished = race.lanes.every((l) => laneResults.has(l.laneNumber));
 
   const isAlreadyFinished = race.status === "finished";
 
-  function handleStart() {
-    setRunning(true);
-    setLaneResults(new Map());
-    setArmedAtSequence(serialPacket?.sequence ?? 0);
+  useEffect(() => {
+    if (race.status === "running") setRunning(true);
+    if (race.status === "finished") setRunning(false);
+  }, [race.status]);
+
+  async function handleStart() {
+    if (starting) return;
+    setStarting(true);
+    try {
+      const response = await fetch("/api/races/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raceId: race.id }),
+      });
+      const data = (await response.json()) as ActionResponse;
+      if (!response.ok) {
+        console.error(data.error ?? "Failed to start race");
+        return;
+      }
+      setRunning(true);
+      setLaneResults(new Map());
+      setArmedAtSequence(serialPacket?.sequence ?? 0);
+      onRaceFinished();
+    } catch {
+      console.error("Failed to start race");
+    } finally {
+      setStarting(false);
+    }
   }
 
   useEffect(() => {
@@ -221,8 +242,12 @@ function RaceCard({
       const next = new Map(prev);
       for (const lane of race.lanes) {
         const serialTimeMs = serialPacket.laneTimesMs[lane.laneNumber];
-        if (serialTimeMs == null || next.has(lane.laneNumber)) continue;
-        next.set(lane.laneNumber, { timeMs: serialTimeMs, resultCode: "finished" });
+        if (serialTimeMs == null) continue;
+        const existing = next.get(lane.laneNumber);
+        next.set(lane.laneNumber, {
+          timeMs: serialTimeMs,
+          resultCode: existing?.resultCode === "dnf" ? "dnf" : "finished",
+        });
       }
       return next;
     });
@@ -232,18 +257,32 @@ function RaceCard({
     if (!running || !allLanesFinished || submitting || isAlreadyFinished) return;
     setSubmitting(true);
     try {
-      const results = race.lanes.map((l) => ({
+      const results = race.lanes.map((l) => {
+        const captured = laneResults.get(l.laneNumber);
+        return {
         laneNumber: l.laneNumber,
-        timeMs: laneResults.get(l.laneNumber)?.timeMs ?? 0,
-        resultCode: laneResults.get(l.laneNumber)?.resultCode ?? "finished",
-      }));
+          timeMs: captured?.timeMs ?? null,
+          resultCode: captured?.resultCode ?? "finished",
+        };
+      });
+
+      if (results.some((r) => r.timeMs == null)) {
+        console.error("Cannot confirm results: missing lane times.");
+        return;
+      }
 
       const response = await fetch(
         `/api/events/${eventId}/races/${race.id}/result`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ laneResults: results }),
+          body: JSON.stringify({
+            laneResults: results.map((r) => ({
+              laneNumber: r.laneNumber,
+              timeMs: r.timeMs as number,
+              resultCode: r.resultCode,
+            })),
+          }),
         }
       );
 
@@ -313,10 +352,10 @@ function RaceCard({
             <button
               type="button"
               onClick={handleStart}
-              disabled={!gateConnected}
+              disabled={!gateConnected || starting}
               className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
             >
-              Start Race
+              {starting ? "Starting..." : "Start Race"}
             </button>
           )}
           {role === "current" && running && !isAlreadyFinished && (
@@ -386,7 +425,7 @@ function Leaderboard({
   useEffect(() => {
     async function load() {
       try {
-        const res = await fetch(`/api/events/${eventId}/leaderboard`);
+        const res = await fetch(`/api/events/${eventId}/leaderboard`, { cache: "no-store" });
         const data = (await res.json()) as LeaderboardResponse;
         if (res.ok) {
           if (data.divisions) setDivisions(data.divisions);
@@ -637,15 +676,19 @@ function TournamentRaceCard({
 }) {
   const [lanes, setLanes] = useState(race.lanes);
   const [swapping, setSwapping] = useState(false);
-  const [running, setRunning] = useState(false);
+  const [running, setRunning] = useState(race.status === "running");
+  const [starting, setStarting] = useState(false);
   const [laneResults, setLaneResults] = useState<Map<number, LaneCaptureResult>>(new Map());
   const [submitting, setSubmitting] = useState(false);
   const [armedAtSequence, setArmedAtSequence] = useState(0);
 
   const isFinished = race.status === "finished";
-  const allLanesFinished = lanes.every(
-    (l) => l.timeMs != null || laneResults.has(l.laneNumber)
-  );
+  const allLanesFinished = lanes.every((l) => laneResults.has(l.laneNumber));
+
+  useEffect(() => {
+    if (race.status === "running") setRunning(true);
+    if (race.status === "finished") setRunning(false);
+  }, [race.status]);
 
   async function handleSwapLanes() {
     if (lanes.length !== 2) return;
@@ -676,10 +719,29 @@ function TournamentRaceCard({
     }
   }
 
-  function handleStart() {
-    setRunning(true);
-    setLaneResults(new Map());
-    setArmedAtSequence(serialPacket?.sequence ?? 0);
+  async function handleStart() {
+    if (starting) return;
+    setStarting(true);
+    try {
+      const response = await fetch("/api/races/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raceId: race.id }),
+      });
+      const data = (await response.json()) as ActionResponse;
+      if (!response.ok) {
+        console.error(data.error ?? "Failed to start race");
+        return;
+      }
+      setRunning(true);
+      setLaneResults(new Map());
+      setArmedAtSequence(serialPacket?.sequence ?? 0);
+      onRaceFinished();
+    } catch {
+      console.error("Failed to start race");
+    } finally {
+      setStarting(false);
+    }
   }
 
   useEffect(() => {
@@ -690,8 +752,12 @@ function TournamentRaceCard({
       const next = new Map(prev);
       for (const lane of lanes) {
         const serialTimeMs = serialPacket.laneTimesMs[lane.laneNumber];
-        if (serialTimeMs == null || next.has(lane.laneNumber)) continue;
-        next.set(lane.laneNumber, { timeMs: serialTimeMs, resultCode: "finished" });
+        if (serialTimeMs == null) continue;
+        const existing = next.get(lane.laneNumber);
+        next.set(lane.laneNumber, {
+          timeMs: serialTimeMs,
+          resultCode: existing?.resultCode === "dnf" ? "dnf" : "finished",
+        });
       }
       return next;
     });
@@ -701,17 +767,32 @@ function TournamentRaceCard({
     if (!running || !allLanesFinished || submitting || isFinished) return;
     setSubmitting(true);
     try {
-      const results = lanes.map((l) => ({
+      const results = lanes.map((l) => {
+        const captured = laneResults.get(l.laneNumber);
+        return {
         laneNumber: l.laneNumber,
-        timeMs: laneResults.get(l.laneNumber)?.timeMs ?? 0,
-        resultCode: laneResults.get(l.laneNumber)?.resultCode ?? "finished",
-      }));
+          timeMs: captured?.timeMs ?? null,
+          resultCode: captured?.resultCode ?? "finished",
+        };
+      });
+
+      if (results.some((r) => r.timeMs == null)) {
+        console.error("Cannot confirm results: missing lane times.");
+        return;
+      }
+
       const response = await fetch(
         `/api/events/${eventId}/races/${race.id}/result`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ laneResults: results }),
+          body: JSON.stringify({
+            laneResults: results.map((r) => ({
+              laneNumber: r.laneNumber,
+              timeMs: r.timeMs as number,
+              resultCode: r.resultCode,
+            })),
+          }),
         }
       );
       if (response.ok) {
@@ -781,10 +862,10 @@ function TournamentRaceCard({
               <button
                 type="button"
                 onClick={handleStart}
-                disabled={!gateConnected}
+                disabled={!gateConnected || starting}
                 className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-medium text-white transition hover:bg-purple-500 disabled:opacity-50"
               >
-                Start Race
+                {starting ? "Starting..." : "Start Race"}
               </button>
             </>
           )}
@@ -981,10 +1062,13 @@ function TournamentSection({
         const allCurrentRoundFinished =
           currentRoundRaces.length > 0 &&
           currentRoundRaces.every((r) => r.status === "finished");
+        const runningCurrentRound = currentRoundRaces.filter(
+          (r) => r.status === "running"
+        );
         const pendingCurrentRound = currentRoundRaces.filter(
           (r) => r.status === "pending"
         );
-        const currentMatch = pendingCurrentRound[0] ?? null;
+        const currentMatch = runningCurrentRound[0] ?? pendingCurrentRound[0] ?? null;
 
         const isChampionshipDecided =
           phase.phaseStatus === "completed" ||
@@ -1189,7 +1273,7 @@ export function RaceDay({
 
   const loadRaces = useCallback(async () => {
     try {
-      const response = await fetch(`/api/events/${eventId}/races`);
+      const response = await fetch(`/api/events/${eventId}/races`, { cache: "no-store" });
       const data = (await response.json()) as RacesResponse;
       if (response.ok) {
         setRaces(data.races ?? []);
@@ -1209,12 +1293,14 @@ export function RaceDay({
     void loadRaces();
   }, [loadRaces]);
 
+  const runningRaces = races.filter((r) => r.status === "running");
   const pendingRaces = races.filter((r) => r.status === "pending");
   const finishedRaces = races.filter((r) => r.status === "finished");
 
-  const currentRace = pendingRaces[0] ?? null;
-  const onDeckRace = pendingRaces[1] ?? null;
-  const inTheHoleRace = pendingRaces[2] ?? null;
+  const hasRunningRace = runningRaces.length > 0;
+  const currentRace = runningRaces[0] ?? pendingRaces[0] ?? null;
+  const onDeckRace = hasRunningRace ? pendingRaces[0] ?? null : pendingRaces[1] ?? null;
+  const inTheHoleRace = hasRunningRace ? pendingRaces[1] ?? null : pendingRaces[2] ?? null;
 
   const totalRaces = races.length;
   const finishedCount = finishedRaces.length;
@@ -1235,7 +1321,7 @@ export function RaceDay({
     );
   }
 
-  const allDone = pendingRaces.length === 0;
+  const allDone = pendingRaces.length === 0 && runningRaces.length === 0;
 
   return (
     <div className="space-y-6">

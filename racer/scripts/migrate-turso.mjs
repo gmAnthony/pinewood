@@ -91,6 +91,10 @@ const schemaStatements = [
         'changes_requested',
         'scratched'
       )),
+    payment_amount INTEGER NOT NULL DEFAULT 10
+      CHECK (payment_amount IN (10, 5, 0)),
+    payment_status TEXT NOT NULL DEFAULT 'pay_later'
+      CHECK (payment_status IN ('paid', 'pay_later')),
     checked_in_at TEXT,
     scratched_at TEXT,
     scratch_reason TEXT,
@@ -282,9 +286,15 @@ async function run() {
   }
 
   const tableInfo = await client.execute("PRAGMA table_info(events)");
-  const hasPublicColumn = tableInfo.rows.some((row) => String(row.name ?? "") === "is_public");
-  if (!hasPublicColumn) {
+  const eventColumns = new Set(tableInfo.rows.map((row) => String(row.name ?? "")));
+  if (!eventColumns.has("is_public")) {
     await client.execute("ALTER TABLE events ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!eventColumns.has("lane_count")) {
+    await client.execute("ALTER TABLE events ADD COLUMN lane_count INTEGER NOT NULL DEFAULT 2");
+  }
+  if (!eventColumns.has("track_length_ft")) {
+    await client.execute("ALTER TABLE events ADD COLUMN track_length_ft REAL");
   }
   await client.execute(
     "CREATE INDEX IF NOT EXISTS idx_events_public_created ON events(is_public, created_at DESC)"

@@ -8,6 +8,8 @@ type RegisterBody = {
   age?: number | null;
   carName?: string;
   divisionId?: string;
+  paymentAmount?: number;
+  paymentStatus?: string;
 };
 
 function sanitize(value: string) {
@@ -47,6 +49,10 @@ export async function POST(
   const carName = sanitize(body.carName ?? "");
   const divisionId = (body.divisionId ?? "").trim();
   const age = typeof body.age === "number" && body.age > 0 ? body.age : null;
+  const paymentAmount = [10, 5, 0].includes(body.paymentAmount ?? -1)
+    ? body.paymentAmount!
+    : 10;
+  const paymentStatus = body.paymentStatus === "paid" ? "paid" : "pay_later";
 
   if (!firstName) {
     return NextResponse.json({ error: "First name is required." }, { status: 400 });
@@ -85,9 +91,9 @@ export async function POST(
     });
 
     await turso.execute({
-      sql: `INSERT INTO cars (id, event_id, division_id, racer_id, car_number, car_name, registration_status)
-            VALUES (?, ?, ?, ?, ?, ?, 'registered')`,
-      args: [carId, eventId, divisionId, racerId, nextCarNumber, carName],
+      sql: `INSERT INTO cars (id, event_id, division_id, racer_id, car_number, car_name, registration_status, payment_amount, payment_status)
+            VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?)`,
+      args: [carId, eventId, divisionId, racerId, nextCarNumber, carName, paymentAmount, paymentStatus],
     });
 
     const inspectionId = randomUUID();
@@ -141,7 +147,9 @@ export async function GET(
             i.body_material_status,
             i.wheels_status,
             i.axles_status,
-            i.lubricants_status
+            i.lubricants_status,
+            c.payment_amount,
+            c.payment_status
           FROM cars c
           JOIN racers r ON r.id = c.racer_id
           JOIN divisions d ON d.id = c.division_id
@@ -177,6 +185,8 @@ export async function GET(
       divisionName: String(row.division_name ?? ""),
       inspectionStatus: String(row.inspection_status ?? "pending"),
       inspectionProgress: { completed: completedChecks, total: checks.length },
+      paymentAmount: Number(row.payment_amount ?? 10),
+      paymentStatus: String(row.payment_status ?? "pay_later"),
     };
   });
 

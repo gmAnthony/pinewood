@@ -12,30 +12,6 @@ type LogEntry = {
   value: string;
 };
 
-declare global {
-  interface Navigator {
-    serial?: {
-      requestPort(options?: { filters?: unknown[] }): Promise<SerialPort>;
-      getPorts(): Promise<SerialPort[]>;
-    };
-  }
-}
-
-interface SerialPort {
-  open(options: SerialOptions): Promise<void>;
-  close(): Promise<void>;
-  readable: ReadableStream<Uint8Array> | null;
-  writable: WritableStream<Uint8Array> | null;
-}
-
-interface SerialOptions {
-  baudRate: number;
-  dataBits?: number;
-  stopBits?: number;
-  parity?: "none" | "even" | "odd";
-  bufferSize?: number;
-  flowControl?: "none" | "hardware";
-}
 
 export function SerialTestClient() {
   const [connected, setConnected] = useState(false);
@@ -138,7 +114,7 @@ export function SerialTestClient() {
           textReader.releaseLock();
         }
       } else {
-        const reader = port.readable!.getReader();
+        const reader = (port.readable as ReadableStream<Uint8Array>).getReader();
         readerRef.current = reader;
         try {
           while (!abort.signal.aborted) {

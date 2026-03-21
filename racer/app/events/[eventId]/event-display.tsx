@@ -23,6 +23,7 @@ type Race = {
   phaseType?: string;
   roundNumber?: number | null;
   groupNumber?: number | null;
+  officialCapturedAt?: string | null;
   lanes: LaneInfo[];
 };
 
@@ -96,15 +97,36 @@ const SPECTATOR_ZOOM_MAX = 160;
 const SPECTATOR_ZOOM_STEP = 5;
 
 function formatTime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const hundredths = Math.floor((ms % 1000) / 10);
-  return `${seconds}.${String(hundredths).padStart(2, "0")}`;
+  return (ms / 1000).toFixed(2);
+}
+
+function formatMph(ms: number, trackLengthFt: number): string {
+  const miles = trackLengthFt / 5280;
+  const hours = ms / 3_600_000;
+  return (miles / hours).toFixed(1);
+}
+
+function isDnfResult(resultCode: string | null | undefined): boolean {
+  return (resultCode ?? "").trim().toLowerCase() === "dnf";
+}
+
+function finishTimeMs(race: Race): number {
+  const raw = race.officialCapturedAt;
+  if (!raw) return 0;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? 0 : ms;
 }
 
 function lastFinishedQualifyingRace(races: Race[]): Race | null {
   const finished = races.filter((r) => r.status === "finished");
   if (finished.length === 0) return null;
-  return [...finished].sort((a, b) => b.raceNumber - a.raceNumber)[0] ?? null;
+  return (
+    [...finished].sort((a, b) => {
+      const t = finishTimeMs(b) - finishTimeMs(a);
+      if (t !== 0) return t;
+      return b.raceNumber - a.raceNumber;
+    })[0] ?? null
+  );
 }
 
 function lastFinishedTournamentRace(races: Race[]): Race | null {
@@ -112,6 +134,9 @@ function lastFinishedTournamentRace(races: Race[]): Race | null {
   if (finished.length === 0) return null;
   return (
     [...finished].sort((a, b) => {
+      const t = finishTimeMs(b) - finishTimeMs(a);
+      if (t !== 0) return t;
+      if (b.raceNumber !== a.raceNumber) return b.raceNumber - a.raceNumber;
       const ra = a.roundNumber ?? 0;
       const rb = b.roundNumber ?? 0;
       if (rb !== ra) return rb - ra;
@@ -149,7 +174,10 @@ function getRecentFinishedRaces(
   }
 
   const sorted = [...pool].sort((a, b) => {
+    const t = finishTimeMs(b) - finishTimeMs(a);
+    if (t !== 0) return t;
     if (sortMode === "tournament") {
+      if (b.raceNumber !== a.raceNumber) return b.raceNumber - a.raceNumber;
       const ra = a.roundNumber ?? 0;
       const rb = b.roundNumber ?? 0;
       if (rb !== ra) return rb - ra;
@@ -161,7 +189,7 @@ function getRecentFinishedRaces(
   return sorted.filter((r) => r.id !== excludeId).slice(0, limit);
 }
 
-function RecentFinishesPanel({ races }: { races: Race[] }) {
+function RecentFinishesPanel({ races, trackLengthFt }: { races: Race[]; trackLengthFt: number | null }) {
   if (races.length === 0) return null;
 
   return (
@@ -188,7 +216,7 @@ function RecentFinishesPanel({ races }: { races: Race[] }) {
                 .slice()
                 .sort((a, b) => (a.place ?? 99) - (b.place ?? 99))
                 .map((lane) => {
-                  const isDnf = lane.resultCode === "dnf";
+                  const isDnf = isDnfResult(lane.resultCode);
                   return (
                     <div
                       key={lane.laneNumber}
@@ -203,9 +231,13 @@ function RecentFinishesPanel({ races }: { races: Race[] }) {
                         {lane.carNumber} {lane.displayName}
                       </span>
                       <span className="shrink-0 font-mono tabular-nums">
-                        {lane.timeMs != null ? formatTime(lane.timeMs) : "—"}
-                        {isDnf && " DNF"}
-                        {lane.place != null && (
+                        {isDnf ? "DNF" : lane.timeMs != null ? formatTime(lane.timeMs) : "—"}
+                        {!isDnf && lane.timeMs != null && trackLengthFt != null && (
+                          <span className="ml-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+                            {formatMph(lane.timeMs, trackLengthFt)} mph
+                          </span>
+                        )}
+                        {!isDnf && lane.place != null && (
                           <span className="ml-1 text-[9px] font-semibold">
                             {lane.place === 1 ? "1st" : lane.place === 2 ? "2nd" : `${lane.place}th`}
                           </span>
@@ -299,7 +331,7 @@ function TournamentBracketReadOnly({ races }: { races: Race[] }) {
                             <span className="text-zinc-600 dark:text-zinc-400">{lane.displayName}</span>
                             {lane.timeMs != null && (
                               <span className="ml-0.5 font-mono text-zinc-500">
-                                {lane.resultCode === "dnf" ? " DNF" : ` ${formatTime(lane.timeMs)}`}
+                                {isDnfResult(lane.resultCode) ? " DNF" : ` ${formatTime(lane.timeMs)}`}
                               </span>
                             )}
                           </div>
@@ -320,10 +352,12 @@ function RacePanelReadOnly({
   race,
   label,
   variant,
+  trackLengthFt,
 }: {
   race: Race | null;
   label: string;
   variant: "hero" | "compact";
+  trackLengthFt: number | null;
 }) {
   const isHero = variant === "hero";
   const labelClass =
@@ -385,7 +419,7 @@ function RacePanelReadOnly({
           .slice()
           .sort((a, b) => a.laneNumber - b.laneNumber)
           .map((lane) => {
-            const isDnf = lane.resultCode === "dnf";
+            const isDnf = isDnfResult(lane.resultCode);
             const place = lane.place;
             return (
               <div
@@ -424,12 +458,14 @@ function RacePanelReadOnly({
                       isHero ? "text-2xl" : "text-sm"
                     }`}
                   >
-                    {lane.timeMs != null ? formatTime(lane.timeMs) : "—"}
+                    {isDnf ? "DNF" : lane.timeMs != null ? formatTime(lane.timeMs) : "—"}
                   </p>
-                  {isDnf && (
-                    <p className="text-[10px] font-semibold text-rose-600 dark:text-rose-400">DNF</p>
+                  {!isDnf && lane.timeMs != null && trackLengthFt != null && (
+                    <p className={`font-mono tabular-nums text-zinc-500 dark:text-zinc-400 ${isHero ? "text-sm" : "text-[10px]"}`}>
+                      {formatMph(lane.timeMs, trackLengthFt)} mph
+                    </p>
                   )}
-                  {place != null && (
+                  {!isDnf && place != null && (
                     <p className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                       {place === 1 ? "1st" : place === 2 ? "2nd" : `${place}th`}
                     </p>
@@ -443,7 +479,7 @@ function RacePanelReadOnly({
   );
 }
 
-function CompactLeaderboard({ divisions }: { divisions: LeaderboardDivision[] }) {
+function CompactLeaderboard({ divisions, trackLengthFt }: { divisions: LeaderboardDivision[]; trackLengthFt: number | null }) {
   if (divisions.length === 0) return null;
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
@@ -471,6 +507,11 @@ function CompactLeaderboard({ divisions }: { divisions: LeaderboardDivision[] })
                   </span>
                   <span className="shrink-0 font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
                     {formatTime(e.averageTimeMs)}
+                    {trackLengthFt != null && (
+                      <span className="ml-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+                        {formatMph(e.averageTimeMs, trackLengthFt)}
+                      </span>
+                    )}
                   </span>
                 </li>
               ))}
@@ -487,22 +528,22 @@ export function EventDisplay({
   eventName,
   eventStatus,
   laneCount,
+  trackLengthFt,
   divisions,
 }: {
   eventId: string;
   eventName: string;
   eventStatus: string;
   laneCount: number;
+  trackLengthFt: number | null;
   divisions: { id: string; name: string; sortOrder: number }[];
 }) {
   const [racesData, setRacesData] = useState<RacesResponse | null>(null);
   const [leaderboardData, setLeaderboardData] = useState<LeaderboardResponse | null>(null);
   const [registrations, setRegistrations] = useState<Registration[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [zoomPercent, setZoomPercent] = useState(SPECTATOR_ZOOM_DEFAULT);
-  const skipZoomSave = useRef(true);
-
-  useEffect(() => {
+  const [zoomPercent, setZoomPercent] = useState(() => {
+    if (typeof window === "undefined") return SPECTATOR_ZOOM_DEFAULT;
     try {
       const raw = localStorage.getItem(SPECTATOR_ZOOM_STORAGE_KEY);
       if (raw != null) {
@@ -512,13 +553,15 @@ export function EventDisplay({
           n >= SPECTATOR_ZOOM_MIN &&
           n <= SPECTATOR_ZOOM_MAX
         ) {
-          setZoomPercent(n);
+          return n;
         }
       }
     } catch {
       /* ignore */
     }
-  }, []);
+    return SPECTATOR_ZOOM_DEFAULT;
+  });
+  const skipZoomSave = useRef(true);
 
   useEffect(() => {
     if (skipZoomSave.current) {
@@ -535,9 +578,9 @@ export function EventDisplay({
   const loadAll = useCallback(async () => {
     try {
       const [rRes, lRes, regRes] = await Promise.all([
-        fetch(`/api/events/${eventId}/races`),
-        fetch(`/api/events/${eventId}/leaderboard`),
-        fetch(`/api/events/${eventId}/register`),
+        fetch(`/api/events/${eventId}/races`, { cache: "no-store" }),
+        fetch(`/api/events/${eventId}/leaderboard`, { cache: "no-store" }),
+        fetch(`/api/events/${eventId}/register`, { cache: "no-store" }),
       ]);
 
       const rJson = (await rRes.json()) as RacesResponse;
@@ -558,18 +601,25 @@ export function EventDisplay({
   }, [eventId]);
 
   useEffect(() => {
-    void loadAll();
+    const t = window.setTimeout(() => void loadAll(), 0);
     const id = window.setInterval(() => void loadAll(), POLL_MS);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearTimeout(t);
+      window.clearInterval(id);
+    };
   }, [loadAll]);
 
   const qualifyingRaces = racesData?.races ?? [];
-  const tournamentRaces = racesData?.tournamentRaces ?? [];
-  const tournamentPhases = racesData?.tournamentPhases ?? [];
+  const tournamentRaces = useMemo(() => racesData?.tournamentRaces ?? [], [racesData?.tournamentRaces]);
+  const tournamentPhases = useMemo(() => racesData?.tournamentPhases ?? [], [racesData?.tournamentPhases]);
 
   const pendingQualifying = qualifyingRaces.filter((r) => r.status === "pending");
+  const runningQualifying = qualifyingRaces.filter((r) => r.status === "running");
   const finishedQualifying = qualifyingRaces.filter((r) => r.status === "finished");
-  const qualifyingDone = qualifyingRaces.length > 0 && pendingQualifying.length === 0;
+  const qualifyingDone =
+    qualifyingRaces.length > 0 &&
+    pendingQualifying.length === 0 &&
+    runningQualifying.length === 0;
 
   const tournamentQueue = useMemo(
     () => getTournamentPendingQueue(tournamentPhases, tournamentRaces),
@@ -577,21 +627,33 @@ export function EventDisplay({
   );
 
   const hasTournamentActivity = tournamentPhases.length > 0 && tournamentRaces.length > 0;
+  const runningTournament = tournamentRaces
+    .filter((r) => r.status === "running")
+    .sort((a, b) => {
+      if ((a.roundNumber ?? 0) !== (b.roundNumber ?? 0)) {
+        return (a.roundNumber ?? 0) - (b.roundNumber ?? 0);
+      }
+      return (a.groupNumber ?? 0) - (b.groupNumber ?? 0);
+    });
 
   const lastFinishedQualifying = lastFinishedQualifyingRace(qualifyingRaces);
   const lastFinishedTournament = lastFinishedTournamentRace(tournamentRaces);
 
   const currentRace: Race | null = qualifyingDone
-    ? tournamentQueue[0] ??
+    ? runningTournament[0] ??
       lastFinishedTournament ??
       lastFinishedQualifying
-    : pendingQualifying[0] ?? lastFinishedQualifying;
+    : runningQualifying[0] ??
+      lastFinishedQualifying ??
+      pendingQualifying[0] ??
+      null;
+  const showingLatestResult = currentRace?.status === "finished";
   const onDeckRace: Race | null = qualifyingDone
-    ? tournamentQueue[1] ?? null
-    : pendingQualifying[1] ?? null;
+    ? tournamentQueue[showingLatestResult ? 0 : 1] ?? null
+    : pendingQualifying[showingLatestResult ? 0 : 1] ?? null;
   const inTheHoleRace: Race | null = qualifyingDone
-    ? tournamentQueue[2] ?? null
-    : pendingQualifying[2] ?? null;
+    ? tournamentQueue[showingLatestResult ? 1 : 2] ?? null
+    : pendingQualifying[showingLatestResult ? 1 : 2] ?? null;
 
   const divisionNameForCars =
     currentRace?.divisionName ??
@@ -621,17 +683,10 @@ export function EventDisplay({
         hasTournamentActivity,
         qualifyingRaces,
         tournamentRaces,
-        currentRace?.status === "finished" ? currentRace.id : null,
+        null,
         6
       ),
-    [
-      qualifyingDone,
-      hasTournamentActivity,
-      qualifyingRaces,
-      tournamentRaces,
-      currentRace?.id,
-      currentRace?.status,
-    ]
+    [qualifyingDone, hasTournamentActivity, qualifyingRaces, tournamentRaces]
   );
 
   return (
@@ -649,6 +704,12 @@ export function EventDisplay({
               <span className="capitalize">{eventStatus}</span>
               {" · "}
               {laneCount} lanes
+              {trackLengthFt != null && (
+                <>
+                  {" · "}
+                  {trackLengthFt} ft track
+                </>
+              )}
               {divisionNameForCars && (
                 <>
                   {" · "}
@@ -714,17 +775,18 @@ export function EventDisplay({
                 currentRace?.status === "finished" ? "Latest result" : "Current race"
               }
               variant="hero"
+              trackLengthFt={trackLengthFt}
             />
           </div>
-          <RecentFinishesPanel races={recentFinished} />
+          <RecentFinishesPanel races={recentFinished} trackLengthFt={trackLengthFt} />
         </div>
 
         <div className="flex min-h-0 flex-col gap-2 overflow-hidden">
           <div className="min-h-0 flex-1 overflow-hidden">
-            <RacePanelReadOnly race={onDeckRace} label="On deck" variant="compact" />
+            <RacePanelReadOnly race={onDeckRace} label="On deck" variant="compact" trackLengthFt={trackLengthFt} />
           </div>
           <div className="min-h-0 flex-1 overflow-hidden">
-            <RacePanelReadOnly race={inTheHoleRace} label="In the hole" variant="compact" />
+            <RacePanelReadOnly race={inTheHoleRace} label="In the hole" variant="compact" trackLengthFt={trackLengthFt} />
           </div>
         </div>
 
@@ -770,7 +832,7 @@ export function EventDisplay({
               </div>
             ))
           ) : (
-            <CompactLeaderboard divisions={leaderboardDivisions} />
+            <CompactLeaderboard divisions={leaderboardDivisions} trackLengthFt={trackLengthFt} />
           )}
         </div>
 
@@ -786,6 +848,11 @@ export function EventDisplay({
               <p className="font-mono text-2xl font-bold tabular-nums text-amber-900 dark:text-amber-100 md:text-3xl">
                 {formatTime(slowestNonDnf.timeMs)}s
               </p>
+              {trackLengthFt != null && (
+                <p className="font-mono text-sm tabular-nums text-amber-800/80 dark:text-amber-200/80">
+                  {formatMph(slowestNonDnf.timeMs, trackLengthFt)} mph
+                </p>
+              )}
               <p className="mt-1 truncate text-sm font-semibold text-amber-900 dark:text-amber-100">
                 #{slowestNonDnf.carNumber} {slowestNonDnf.displayName}
               </p>

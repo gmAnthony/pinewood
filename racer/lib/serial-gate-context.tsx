@@ -8,28 +8,6 @@ export type SerialPacket = {
   rawLine: string;
 };
 
-declare global {
-  interface Navigator {
-    serial?: {
-      requestPort(options?: { filters?: unknown[] }): Promise<SerialPort>;
-    };
-  }
-}
-
-interface SerialPort {
-  open(options: SerialOptions): Promise<void>;
-  close(): Promise<void>;
-  readable: ReadableStream<Uint8Array> | null;
-}
-
-interface SerialOptions {
-  baudRate: number;
-  dataBits?: number;
-  stopBits?: number;
-  parity?: "none" | "even" | "odd";
-  bufferSize?: number;
-  flowControl?: "none" | "hardware";
-}
 
 type SerialGateContextValue = {
   serialPacket: SerialPacket | null;

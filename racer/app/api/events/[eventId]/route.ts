@@ -6,6 +6,7 @@ import { ensureDatabaseSchema, turso } from "@/lib/turso";
 type UpdateEventBody = {
   name?: string;
   isPublic?: boolean;
+  trackLengthFt?: number | null;
 };
 
 function sanitizeName(value: string) {
@@ -32,6 +33,10 @@ export async function PATCH(
   const body = (await request.json()) as UpdateEventBody;
   const name = sanitizeName(body.name ?? "");
   const isPublic = body.isPublic === true ? 1 : 0;
+  const trackLengthFt =
+    body.trackLengthFt != null && Number.isFinite(body.trackLengthFt) && body.trackLengthFt > 0
+      ? body.trackLengthFt
+      : null;
 
   if (!eventId) {
     return NextResponse.json({ error: "Missing eventId." }, { status: 400 });
@@ -52,13 +57,13 @@ export async function PATCH(
   }
 
   await turso.execute({
-    sql: "UPDATE events SET name = ?, is_public = ? WHERE id = ?",
-    args: [name, isPublic, eventId],
+    sql: "UPDATE events SET name = ?, is_public = ?, track_length_ft = ? WHERE id = ?",
+    args: [name, isPublic, trackLengthFt, eventId],
   });
 
   return NextResponse.json({
     message: "Event updated.",
-    event: { id: eventId, name, isPublic: isPublic === 1 },
+    event: { id: eventId, name, isPublic: isPublic === 1, trackLengthFt },
   });
 }
 

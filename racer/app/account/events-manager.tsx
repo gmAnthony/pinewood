@@ -8,6 +8,7 @@ type EventItem = {
   name: string;
   status: string;
   isPublic: boolean;
+  trackLengthFt: number | null;
   createdAt: string;
   divisionCount: number;
 };
@@ -24,6 +25,7 @@ export function EventsManager() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editPublic, setEditPublic] = useState(false);
+  const [editTrackLength, setEditTrackLength] = useState("");
   const [busyEventId, setBusyEventId] = useState<string | null>(null);
 
   const emptyState = useMemo(() => events.length === 0 && !loading, [events.length, loading]);
@@ -63,12 +65,14 @@ export function EventsManager() {
     setEditingId(event.id);
     setEditName(event.name);
     setEditPublic(event.isPublic);
+    setEditTrackLength(event.trackLengthFt != null ? String(event.trackLengthFt) : "");
   }
 
   function cancelEdit() {
     setEditingId(null);
     setEditName("");
     setEditPublic(false);
+    setEditTrackLength("");
   }
 
   async function saveEdit(eventId: string) {
@@ -80,6 +84,7 @@ export function EventsManager() {
         body: JSON.stringify({
           name: editName,
           isPublic: editPublic,
+          trackLengthFt: editTrackLength ? parseFloat(editTrackLength) : null,
         }),
       });
       const data = (await response.json()) as { message?: string; error?: string };
@@ -196,6 +201,24 @@ export function EventsManager() {
                   />
                   Public event
                 </label>
+                <div>
+                  <label
+                    htmlFor={`track-length-${event.id}`}
+                    className="block text-sm text-zinc-700 dark:text-zinc-300"
+                  >
+                    Track length (feet)
+                  </label>
+                  <input
+                    id={`track-length-${event.id}`}
+                    type="number"
+                    step="any"
+                    min="0"
+                    placeholder="e.g. 32"
+                    value={editTrackLength}
+                    onChange={(inputEvent) => setEditTrackLength(inputEvent.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-zinc-900 outline-none ring-zinc-300 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                  />
+                </div>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -225,6 +248,7 @@ export function EventsManager() {
                     <p className="text-sm text-zinc-600 dark:text-zinc-400">
                       Status: {event.status} | Divisions: {event.divisionCount} |{" "}
                       {event.isPublic ? "Public" : "Private"}
+                      {event.trackLengthFt != null && ` | Track: ${event.trackLengthFt} ft`}
                     </p>
                   </div>
                   <button

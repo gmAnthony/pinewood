@@ -13,7 +13,7 @@ export default async function EventSpectatorPage({
   await ensureDatabaseSchema();
 
   const eventResult = await turso.execute({
-    sql: "SELECT id, name, status, lane_count FROM events WHERE id = ? LIMIT 1",
+    sql: "SELECT id, name, status, lane_count, track_length_ft FROM events WHERE id = ? LIMIT 1",
     args: [eventId],
   });
 
@@ -25,6 +25,7 @@ export default async function EventSpectatorPage({
   const eventName = String(row.name ?? "");
   const eventStatus = String(row.status ?? "");
   const laneCount = Number(row.lane_count ?? 2);
+  const trackLengthFt = row.track_length_ft != null ? Number(row.track_length_ft) : null;
 
   const divisionsResult = await turso.execute({
     sql: `SELECT id, name, sort_order
@@ -61,6 +62,7 @@ export default async function EventSpectatorPage({
         eventName={eventName}
         eventStatus={eventStatus}
         laneCount={laneCount}
+        trackLengthFt={trackLengthFt}
         divisions={divisions}
       />
     </main>

@@ -70,6 +70,10 @@ const schemaStatements: string[] = [
         'changes_requested',
         'scratched'
       )),
+    payment_amount INTEGER NOT NULL DEFAULT 10
+      CHECK (payment_amount IN (10, 5, 0)),
+    payment_status TEXT NOT NULL DEFAULT 'pay_later'
+      CHECK (payment_status IN ('paid', 'pay_later')),
     checked_in_at TEXT,
     scratched_at TEXT,
     scratch_reason TEXT,
@@ -254,6 +258,21 @@ async function ensureEventColumns() {
   if (!columns.has("lane_count")) {
     await turso.execute("ALTER TABLE events ADD COLUMN lane_count INTEGER NOT NULL DEFAULT 2");
   }
+  if (!columns.has("track_length_ft")) {
+    await turso.execute("ALTER TABLE events ADD COLUMN track_length_ft REAL");
+  }
+}
+
+async function ensureCarColumns() {
+  const tableInfo = await turso.execute("PRAGMA table_info(cars)");
+  const columns = new Set(tableInfo.rows.map((row) => String(row.name ?? "")));
+
+  if (!columns.has("payment_amount")) {
+    await turso.execute("ALTER TABLE cars ADD COLUMN payment_amount INTEGER NOT NULL DEFAULT 10");
+  }
+  if (!columns.has("payment_status")) {
+    await turso.execute("ALTER TABLE cars ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'pay_later'");
+  }
 }
 
 async function ensurePhaseColumns() {
@@ -279,6 +298,7 @@ export async function ensureDatabaseSchema() {
       }
 
       await ensureEventColumns();
+      await ensureCarColumns();
       await ensurePhaseColumns();
       await turso.execute(
         "CREATE INDEX IF NOT EXISTS idx_events_public_created ON events(is_public, created_at DESC)"
