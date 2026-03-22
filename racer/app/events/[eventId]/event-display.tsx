@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { ArrowLeft, ArrowRight, ArrowUp } from "lucide-react";
 import { useTheme } from "@/lib/theme-context";
 
 type LaneInfo = {
@@ -372,8 +373,9 @@ function RacePanelReadOnly({
   eventId: string;
 }) {
   const isHero = variant === "hero";
-  const labelClass =
-    variant === "hero"
+  const labelClass = label.includes("Previous")
+    ? "bg-emerald-600 text-white"
+    : isHero
       ? "bg-blue-600 text-white"
       : label.includes("Deck")
         ? "bg-amber-500 text-white"
@@ -539,6 +541,106 @@ function CompactLeaderboard({ divisions, trackLengthFt, eventId }: { divisions: 
   );
 }
 
+function CombinedRacersPanel({
+  registrations,
+  leaderboardDivisions,
+  trackLengthFt,
+  eventId,
+}: {
+  registrations: Registration[];
+  leaderboardDivisions: LeaderboardDivision[];
+  trackLengthFt: number | null;
+  eventId: string;
+}) {
+  const leaderboardMap = useMemo(() => {
+    const map = new Map<string, LeaderboardEntry>();
+    for (const div of leaderboardDivisions) {
+      for (const entry of div.entries) {
+        map.set(entry.carId, entry);
+      }
+    }
+    return map;
+  }, [leaderboardDivisions]);
+
+  const divisionGroups = useMemo(() => {
+    const groups = new Map<string, Registration[]>();
+    for (const reg of registrations) {
+      if (reg.registrationStatus === "scratched") continue;
+      const list = groups.get(reg.divisionName) ?? [];
+      list.push(reg);
+      groups.set(reg.divisionName, list);
+    }
+    for (const [, regs] of groups) {
+      regs.sort((a, b) => {
+        const aEntry = leaderboardMap.get(a.carId);
+        const bEntry = leaderboardMap.get(b.carId);
+        if (aEntry && bEntry) return aEntry.seed - bEntry.seed;
+        if (aEntry) return -1;
+        if (bEntry) return 1;
+        return a.carNumber - b.carNumber;
+      });
+    }
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [registrations, leaderboardMap]);
+
+  if (divisionGroups.length === 0) return null;
+
+  return (
+    <div className="flex min-w-0 flex-col rounded-xl border border-zinc-200 bg-white lg:min-h-0 lg:flex-1 lg:overflow-hidden dark:border-zinc-800 dark:bg-zinc-950">
+      <p className="shrink-0 border-b border-zinc-200 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        Racers
+      </p>
+      <div className="flex flex-col gap-2 p-2 lg:min-h-0 lg:flex-1 lg:flex-row lg:overflow-hidden">
+        {divisionGroups.map(([divName, regs]) => (
+          <div
+            key={divName}
+            className="flex min-w-0 flex-col rounded-lg border border-zinc-100 bg-zinc-50 lg:flex-1 lg:overflow-hidden dark:border-zinc-800 dark:bg-zinc-900/50"
+          >
+            <p className="shrink-0 truncate border-b border-zinc-200 px-2 py-1 text-[10px] font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
+              {divName}
+            </p>
+            <ul className="space-y-0.5 p-1 lg:min-h-0 lg:flex-1 lg:overflow-y-auto">
+              {regs.map((reg) => {
+                const entry = leaderboardMap.get(reg.carId);
+                return (
+                  <li
+                    key={reg.carId}
+                    className="flex items-center justify-between gap-1 truncate rounded px-1 text-[10px] text-zinc-700 dark:text-zinc-300"
+                  >
+                    <Link
+                      href={`/events/${eventId}/racers/${reg.carId}`}
+                      className="min-w-0 truncate hover:text-blue-600 hover:underline dark:hover:text-blue-400"
+                    >
+                      {entry && (
+                        <span className="font-mono text-zinc-500">{entry.seed}.</span>
+                      )}{" "}
+                      #{reg.carNumber} {reg.displayName}
+                    </Link>
+                    <span className="shrink-0 font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
+                      {entry ? (
+                        <>
+                          {formatTime(entry.averageTimeMs)}
+                          {trackLengthFt != null && (
+                            <span className="ml-1 text-[9px] text-zinc-400 dark:text-zinc-500">
+                              {formatMph(entry.averageTimeMs, trackLengthFt)}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function EventDisplay({
   eventId,
   eventName,
@@ -656,35 +758,28 @@ export function EventDisplay({
   const lastFinishedQualifying = lastFinishedQualifyingRace(qualifyingRaces);
   const lastFinishedTournament = lastFinishedTournamentRace(tournamentRaces);
 
+  const previousRace: Race | null = qualifyingDone
+    ? lastFinishedTournament ?? lastFinishedQualifying
+    : lastFinishedQualifying;
+
   const currentRace: Race | null = qualifyingDone
-    ? runningTournament[0] ??
-      lastFinishedTournament ??
-      lastFinishedQualifying
-    : runningQualifying[0] ??
-      lastFinishedQualifying ??
-      pendingQualifying[0] ??
-      null;
-  const showingLatestResult = currentRace?.status === "finished";
+    ? runningTournament[0] ?? tournamentQueue[0] ?? null
+    : runningQualifying[0] ?? pendingQualifying[0] ?? null;
+
+  const pendingOffset = currentRace?.status === "pending" ? 1 : 0;
   const onDeckRace: Race | null = qualifyingDone
-    ? tournamentQueue[showingLatestResult ? 0 : 1] ?? null
-    : pendingQualifying[showingLatestResult ? 0 : 1] ?? null;
+    ? tournamentQueue[pendingOffset] ?? null
+    : pendingQualifying[pendingOffset] ?? null;
   const inTheHoleRace: Race | null = qualifyingDone
-    ? tournamentQueue[showingLatestResult ? 1 : 2] ?? null
-    : pendingQualifying[showingLatestResult ? 1 : 2] ?? null;
+    ? tournamentQueue[pendingOffset + 1] ?? null
+    : pendingQualifying[pendingOffset + 1] ?? null;
 
   const divisionNameForCars =
+    previousRace?.divisionName ??
     currentRace?.divisionName ??
     onDeckRace?.divisionName ??
-    inTheHoleRace?.divisionName ??
     divisions[0]?.name ??
     null;
-
-  const carsInDivision = useMemo(() => {
-    if (!divisionNameForCars) return registrations;
-    return registrations.filter((r) => r.divisionName === divisionNameForCars);
-  }, [registrations, divisionNameForCars]);
-
-  const activeNonScratched = carsInDivision.filter((c) => c.registrationStatus !== "scratched");
 
   const slowestNonDnf = leaderboardData?.slowestNonDnf ?? null;
   const leaderboardDivisions = leaderboardData?.divisions ?? [];
@@ -693,22 +788,9 @@ export function EventDisplay({
   const progressPct =
     totalQualifying > 0 ? Math.round((finishedQualifying.length / totalQualifying) * 100) : 0;
 
-  const recentFinished = useMemo(
-    () =>
-      getRecentFinishedRaces(
-        qualifyingDone,
-        hasTournamentActivity,
-        qualifyingRaces,
-        tournamentRaces,
-        null,
-        6
-      ),
-    [qualifyingDone, hasTournamentActivity, qualifyingRaces, tournamentRaces]
-  );
-
   return (
     <div
-      className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden px-3 pb-3 pt-2"
+      className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3 pt-2 lg:overflow-hidden"
       style={{ zoom: zoomPercent / 100 }}
     >
       <div className="shrink-0 rounded-xl border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
@@ -800,65 +882,45 @@ export function EventDisplay({
         )}
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 overflow-hidden lg:grid-cols-[minmax(0,1.35fr)_minmax(0,0.5fr)_minmax(0,0.55fr)]">
-        <div className="flex min-h-0 flex-col gap-2 overflow-hidden">
-          <div className="shrink-0">
-            <RacePanelReadOnly
-              race={currentRace}
-              label={
-                currentRace?.status === "finished" ? "Latest result" : "Current race"
-              }
-              variant="hero"
-              trackLengthFt={trackLengthFt}
-              eventId={eventId}
-            />
-          </div>
-          <RecentFinishesPanel races={recentFinished} trackLengthFt={trackLengthFt} eventId={eventId} />
+      <div className="grid shrink-0 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_24px_minmax(0,1fr)]">
+        <RacePanelReadOnly
+          race={previousRace}
+          label="Previous race"
+          variant="hero"
+          trackLengthFt={trackLengthFt}
+          eventId={eventId}
+        />
+        <div className="hidden items-center justify-center lg:flex">
+          <ArrowLeft className="h-5 w-5 text-zinc-400 dark:text-zinc-600" strokeWidth={2} />
         </div>
+        <RacePanelReadOnly
+          race={currentRace}
+          label={currentRace?.status === "running" ? "Current race" : "Next race"}
+          variant="hero"
+          trackLengthFt={trackLengthFt}
+          eventId={eventId}
+        />
+      </div>
 
-        <div className="flex min-h-0 flex-col gap-2 overflow-hidden">
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <RacePanelReadOnly race={onDeckRace} label="On deck" variant="compact" trackLengthFt={trackLengthFt} eventId={eventId} />
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden">
-            <RacePanelReadOnly race={inTheHoleRace} label="In the hole" variant="compact" trackLengthFt={trackLengthFt} eventId={eventId} />
-          </div>
-        </div>
-
-        <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
-          <div className="shrink-0 border-b border-zinc-200 px-2 py-1 dark:border-zinc-800">
-            <p className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-              Registered cars
-            </p>
-            {divisionNameForCars && (
-              <p className="truncate text-[11px] text-zinc-600 dark:text-zinc-300">{divisionNameForCars}</p>
-            )}
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden p-2">
-            {activeNonScratched.length === 0 ? (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">No cars in this division.</p>
-            ) : (
-              <ul className="grid h-full grid-cols-1 content-start gap-x-2 gap-y-0.5 overflow-hidden sm:grid-cols-2">
-                {activeNonScratched.map((c) => (
-                  <li
-                    key={c.carId}
-                    className="truncate text-[11px] text-zinc-700 dark:text-zinc-300"
-                    title={`#${c.carNumber} ${c.displayName} — ${c.carName}`}
-                  >
-                    <span className="font-mono font-semibold text-zinc-500">#{c.carNumber}</span>{" "}
-                    {c.displayName}
-                    <span className="text-zinc-500"> · {c.carName}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+      <div className="grid shrink-0 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_24px_minmax(0,1fr)]">
+        <div />
+        <div />
+        <div className="hidden items-center justify-center py-0.5 lg:flex">
+          <ArrowUp className="h-4 w-4 text-zinc-400 dark:text-zinc-600" strokeWidth={2} />
         </div>
       </div>
 
-      <div className="grid h-[min(26vh,220px)] shrink-0 grid-cols-1 gap-2 overflow-hidden lg:grid-cols-[minmax(0,1fr)_minmax(0,220px)]">
-        <div className="flex min-h-0 min-w-0 gap-2 overflow-hidden">
-          {hasTournamentActivity && qualifyingDone ? (
+      <div className="grid shrink-0 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_24px_minmax(0,1fr)]">
+        <RacePanelReadOnly race={inTheHoleRace} label="In the hole" variant="compact" trackLengthFt={trackLengthFt} eventId={eventId} />
+        <div className="hidden items-center justify-center lg:flex">
+          <ArrowRight className="h-4 w-4 text-zinc-400 dark:text-zinc-600" strokeWidth={2} />
+        </div>
+        <RacePanelReadOnly race={onDeckRace} label="On deck" variant="compact" trackLengthFt={trackLengthFt} eventId={eventId} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,220px)] lg:overflow-hidden">
+        <div className="flex min-w-0 flex-col gap-2 lg:min-h-0 lg:flex-row lg:overflow-hidden">
+          {hasTournamentActivity && qualifyingDone &&
             tournamentPhases.map((phase) => (
               <div key={phase.phaseId} className="min-w-0 flex-1">
                 <TournamentBracketReadOnly
@@ -866,10 +928,13 @@ export function EventDisplay({
                   eventId={eventId}
                 />
               </div>
-            ))
-          ) : (
-            <CompactLeaderboard divisions={leaderboardDivisions} trackLengthFt={trackLengthFt} eventId={eventId} />
-          )}
+            ))}
+          <CombinedRacersPanel
+            registrations={registrations}
+            leaderboardDivisions={leaderboardDivisions}
+            trackLengthFt={trackLengthFt}
+            eventId={eventId}
+          />
         </div>
 
         <div className="flex min-h-0 flex-col justify-center overflow-hidden rounded-xl border-2 border-amber-300/80 bg-linear-to-br from-amber-50 to-amber-100/80 px-3 py-2 dark:border-amber-700 dark:from-amber-950/40 dark:to-amber-950/20">
