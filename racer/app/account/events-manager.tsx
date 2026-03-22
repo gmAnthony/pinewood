@@ -11,6 +11,7 @@ type EventItem = {
   trackLengthFt: number | null;
   createdAt: string;
   divisionCount: number;
+  hasRaces: boolean;
 };
 
 type EventsResponse = {
@@ -261,7 +262,14 @@ export function EventsManager() {
                   </button>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {event.status === "registration" ? (
+                  {["qualifying", "tournament", "paused", "completed"].includes(event.status) || event.hasRaces ? (
+                    <Link
+                      href={`/events/${event.id}/race`}
+                      className="rounded-lg bg-zinc-900 px-3 py-2 text-sm text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                    >
+                      View Race
+                    </Link>
+                  ) : event.status === "registration" ? (
                     <Link
                       href={`/events/${event.id}/register`}
                       className="rounded-lg bg-zinc-900 px-3 py-2 text-sm text-white transition hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"

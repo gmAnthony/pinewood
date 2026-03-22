@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useTheme } from "@/lib/theme-context";
 
 type LaneInfo = {
@@ -190,7 +191,7 @@ function getRecentFinishedRaces(
   return sorted.filter((r) => r.id !== excludeId).slice(0, limit);
 }
 
-function RecentFinishesPanel({ races, trackLengthFt }: { races: Race[]; trackLengthFt: number | null }) {
+function RecentFinishesPanel({ races, trackLengthFt, eventId }: { races: Race[]; trackLengthFt: number | null; eventId: string }) {
   if (races.length === 0) return null;
 
   return (
@@ -227,10 +228,13 @@ function RecentFinishesPanel({ races, trackLengthFt }: { races: Race[]; trackLen
                           : "text-zinc-600 dark:text-zinc-400"
                       }`}
                     >
-                      <span className="min-w-0 truncate">
+                      <Link
+                        href={`/events/${eventId}/racers/${lane.carId}`}
+                        className="min-w-0 truncate hover:underline"
+                      >
                         <span className="font-mono text-zinc-500">L{lane.laneNumber}</span> #
                         {lane.carNumber} {lane.displayName}
-                      </span>
+                      </Link>
                       <span className="shrink-0 font-mono tabular-nums">
                         {isDnf ? "DNF" : lane.timeMs != null ? formatTime(lane.timeMs) : "—"}
                         {!isDnf && lane.timeMs != null && trackLengthFt != null && (
@@ -273,7 +277,7 @@ function getTournamentPendingQueue(
   return queue;
 }
 
-function TournamentBracketReadOnly({ races }: { races: Race[] }) {
+function TournamentBracketReadOnly({ races, eventId }: { races: Race[]; eventId: string }) {
   if (races.length === 0) return null;
 
   const rounds = [...new Set(races.map((r) => r.roundNumber ?? 1))].sort((a, b) => a - b);
@@ -326,10 +330,15 @@ function TournamentBracketReadOnly({ races }: { races: Race[] }) {
                                 : "bg-zinc-50 dark:bg-zinc-900"
                             }`}
                           >
-                            <span className="font-medium text-zinc-800 dark:text-zinc-200">
-                              #{lane.carNumber}
-                            </span>{" "}
-                            <span className="text-zinc-600 dark:text-zinc-400">{lane.displayName}</span>
+                            <Link
+                              href={`/events/${eventId}/racers/${lane.carId}`}
+                              className="hover:underline"
+                            >
+                              <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                                #{lane.carNumber}
+                              </span>{" "}
+                              <span className="text-zinc-600 dark:text-zinc-400">{lane.displayName}</span>
+                            </Link>
                             {lane.timeMs != null && (
                               <span className="ml-0.5 font-mono text-zinc-500">
                                 {isDnfResult(lane.resultCode) ? " DNF" : ` ${formatTime(lane.timeMs)}`}
@@ -354,11 +363,13 @@ function RacePanelReadOnly({
   label,
   variant,
   trackLengthFt,
+  eventId,
 }: {
   race: Race | null;
   label: string;
   variant: "hero" | "compact";
   trackLengthFt: number | null;
+  eventId: string;
 }) {
   const isHero = variant === "hero";
   const labelClass =
@@ -439,8 +450,9 @@ function RacePanelReadOnly({
                   {lane.laneNumber}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p
-                    className={`truncate font-medium text-zinc-900 dark:text-zinc-100 ${
+                  <Link
+                    href={`/events/${eventId}/racers/${lane.carId}`}
+                    className={`block truncate font-medium text-zinc-900 hover:text-blue-600 hover:underline dark:text-zinc-100 dark:hover:text-blue-400 ${
                       isHero ? "text-base" : "text-xs"
                     }`}
                   >
@@ -450,7 +462,7 @@ function RacePanelReadOnly({
                       </span>
                     )}
                     #{lane.carNumber} {lane.displayName}
-                  </p>
+                  </Link>
                   <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">{lane.carName}</p>
                 </div>
                 <div className="shrink-0 text-right">
@@ -480,7 +492,7 @@ function RacePanelReadOnly({
   );
 }
 
-function CompactLeaderboard({ divisions, trackLengthFt }: { divisions: LeaderboardDivision[]; trackLengthFt: number | null }) {
+function CompactLeaderboard({ divisions, trackLengthFt, eventId }: { divisions: LeaderboardDivision[]; trackLengthFt: number | null; eventId: string }) {
   if (divisions.length === 0) return null;
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950">
@@ -496,16 +508,19 @@ function CompactLeaderboard({ divisions, trackLengthFt }: { divisions: Leaderboa
             <p className="shrink-0 truncate border-b border-zinc-200 px-2 py-1 text-[10px] font-semibold text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">
               {div.divisionName}
             </p>
-            <ul className="min-h-0 flex-1 space-y-0.5 overflow-hidden p-1">
-              {div.entries.slice(0, 5).map((e) => (
+            <ul className="min-h-0 flex-1 space-y-0.5 overflow-y-auto p-1">
+              {div.entries.map((e) => (
                 <li
                   key={e.carId}
                   className="flex items-center justify-between gap-1 truncate rounded px-1 text-[10px] text-zinc-700 dark:text-zinc-300"
                 >
-                  <span className="min-w-0 truncate">
+                  <Link
+                    href={`/events/${eventId}/racers/${e.carId}`}
+                    className="min-w-0 truncate hover:text-blue-600 hover:underline dark:hover:text-blue-400"
+                  >
                     <span className="font-mono text-zinc-500">{e.seed}.</span> #{e.carNumber}{" "}
                     {e.displayName}
-                  </span>
+                  </Link>
                   <span className="shrink-0 font-mono tabular-nums text-zinc-600 dark:text-zinc-400">
                     {formatTime(e.averageTimeMs)}
                     {trackLengthFt != null && (
@@ -795,17 +810,18 @@ export function EventDisplay({
               }
               variant="hero"
               trackLengthFt={trackLengthFt}
+              eventId={eventId}
             />
           </div>
-          <RecentFinishesPanel races={recentFinished} trackLengthFt={trackLengthFt} />
+          <RecentFinishesPanel races={recentFinished} trackLengthFt={trackLengthFt} eventId={eventId} />
         </div>
 
         <div className="flex min-h-0 flex-col gap-2 overflow-hidden">
           <div className="min-h-0 flex-1 overflow-hidden">
-            <RacePanelReadOnly race={onDeckRace} label="On deck" variant="compact" trackLengthFt={trackLengthFt} />
+            <RacePanelReadOnly race={onDeckRace} label="On deck" variant="compact" trackLengthFt={trackLengthFt} eventId={eventId} />
           </div>
           <div className="min-h-0 flex-1 overflow-hidden">
-            <RacePanelReadOnly race={inTheHoleRace} label="In the hole" variant="compact" trackLengthFt={trackLengthFt} />
+            <RacePanelReadOnly race={inTheHoleRace} label="In the hole" variant="compact" trackLengthFt={trackLengthFt} eventId={eventId} />
           </div>
         </div>
 
@@ -847,11 +863,12 @@ export function EventDisplay({
               <div key={phase.phaseId} className="min-w-0 flex-1">
                 <TournamentBracketReadOnly
                   races={tournamentRaces.filter((r) => r.phaseId === phase.phaseId)}
+                  eventId={eventId}
                 />
               </div>
             ))
           ) : (
-            <CompactLeaderboard divisions={leaderboardDivisions} trackLengthFt={trackLengthFt} />
+            <CompactLeaderboard divisions={leaderboardDivisions} trackLengthFt={trackLengthFt} eventId={eventId} />
           )}
         </div>
 

@@ -1248,7 +1248,55 @@ export function RaceDay({
   const [loading, setLoading] = useState(true);
   const [resettingRaceId, setResettingRaceId] = useState<string | null>(null);
   const [leaderboardKey, setLeaderboardKey] = useState(0);
+  const [editingRaceId, setEditingRaceId] = useState<string | null>(null);
+  const [editLanes, setEditLanes] = useState<Map<number, { timeSeconds: string; resultCode: "finished" | "dnf" }>>(new Map());
+  const [savingEdit, setSavingEdit] = useState(false);
   const { serialPacket, serialConnected } = useSerialGate();
+
+  function beginEditRace(race: Race) {
+    setEditingRaceId(race.id);
+    const lanes = new Map<number, { timeSeconds: string; resultCode: "finished" | "dnf" }>();
+    for (const lane of race.lanes) {
+      lanes.set(lane.laneNumber, {
+        timeSeconds: lane.timeMs != null ? (lane.timeMs / 1000).toFixed(3) : "",
+        resultCode: lane.resultCode === "dnf" ? "dnf" : "finished",
+      });
+    }
+    setEditLanes(lanes);
+  }
+
+  function cancelEditRace() {
+    setEditingRaceId(null);
+    setEditLanes(new Map());
+  }
+
+  async function saveEditRace(raceId: string) {
+    setSavingEdit(true);
+    try {
+      const laneResults = [...editLanes.entries()].map(([laneNumber, data]) => ({
+        laneNumber,
+        timeMs: Math.round(parseFloat(data.timeSeconds) * 1000),
+        resultCode: data.resultCode,
+      }));
+      const res = await fetch(`/api/events/${eventId}/races/${raceId}/result`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ laneResults }),
+      });
+      const data = (await res.json()) as ActionResponse;
+      if (!res.ok) {
+        alert(data.error ?? "Failed to save edits");
+        return;
+      }
+      setEditingRaceId(null);
+      setEditLanes(new Map());
+      await loadRaces();
+    } catch {
+      alert("Failed to save edits");
+    } finally {
+      setSavingEdit(false);
+    }
+  }
 
   async function handleRedoRace(raceId: string) {
     if (!confirm("Reset this heat and re-run it?")) return;
@@ -1443,6 +1491,15 @@ export function RaceDay({
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
+                    {editingRaceId !== race.id && (
+                      <button
+                        type="button"
+                        onClick={() => beginEditRace(race)}
+                        className="rounded-lg border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                      >
+                        Edit
+                      </button>
+                    )}
                     <button
                       type="button"
                       disabled={resettingRaceId === race.id}
@@ -1456,27 +1513,113 @@ export function RaceDay({
                     </span>
                   </div>
                 </div>
-                <div className="mt-2 flex gap-4">
-                  {race.lanes
-                    .sort((a, b) => (a.place ?? 99) - (b.place ?? 99))
-                    .map((lane) => (
-                      <div key={lane.laneNumber} className="text-xs">
-                        <span className="font-medium text-zinc-700 dark:text-zinc-300">
-                          {lane.place === 1 ? "🏆" : `${lane.place}.`}
-                        </span>{" "}
-                        <span className="text-zinc-600 dark:text-zinc-400">
-                          #{lane.carNumber} {lane.displayName}
-                        </span>{" "}
-                        <span className="font-mono tabular-nums text-zinc-500 dark:text-zinc-400">
-                          {lane.timeMs != null
-                            ? lane.resultCode === "dnf"
-                              ? `${formatTime(lane.timeMs)} (DNF)`
-                              : `${formatTime(lane.timeMs)}s`
-                            : "—"}
-                        </span>
-                      </div>
-                    ))}
-                </div>
+
+                {editingRaceId === race.id ? (
+                  <div className="mt-3 space-y-3">
+                    {race.lanes
+                      .slice()
+                      .sort((a, b) => a.laneNumber - b.laneNumber)
+                      .map((lane) => {
+                        const edit = editLanes.get(lane.laneNumber);
+                        if (!edit) return null;
+                        return (
+                          <div
+                            key={lane.laneNumber}
+                            className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 dark:border-zinc-700 dark:bg-zinc-900"
+                          >
+                            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-xs font-bold text-zinc-600 dark:bg-zinc-700 dark:text-zinc-300">
+                              {lane.laneNumber}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-200">
+                                #{lane.carNumber} {lane.displayName}
+                              </p>
+                              <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">
+                                {lane.carName}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <label className="text-xs text-zinc-500 dark:text-zinc-400">Time (s)</label>
+                              <input
+                                type="number"
+                                step="0.001"
+                                min="0"
+                                value={edit.timeSeconds}
+                                onChange={(e) => {
+                                  setEditLanes((prev) => {
+                                    const next = new Map(prev);
+                                    next.set(lane.laneNumber, { ...edit, timeSeconds: e.target.value });
+                                    return next;
+                                  });
+                                }}
+                                className="w-24 rounded-md border border-zinc-300 bg-white px-2 py-1 font-mono text-sm tabular-nums text-zinc-900 outline-none ring-zinc-300 focus:ring-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100"
+                              />
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditLanes((prev) => {
+                                  const next = new Map(prev);
+                                  next.set(lane.laneNumber, {
+                                    ...edit,
+                                    resultCode: edit.resultCode === "dnf" ? "finished" : "dnf",
+                                  });
+                                  return next;
+                                });
+                              }}
+                              className={`shrink-0 rounded-lg px-3 py-1 text-xs font-medium transition ${
+                                edit.resultCode === "dnf"
+                                  ? "bg-rose-600 text-white hover:bg-rose-500"
+                                  : "border border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                              }`}
+                            >
+                              {edit.resultCode === "dnf" ? "DNF" : "Mark DNF"}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        disabled={savingEdit}
+                        onClick={() => void saveEditRace(race.id)}
+                        className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+                      >
+                        {savingEdit ? "Saving..." : "Save"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={savingEdit}
+                        onClick={cancelEditRace}
+                        className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 flex gap-4">
+                    {race.lanes
+                      .sort((a, b) => (a.place ?? 99) - (b.place ?? 99))
+                      .map((lane) => (
+                        <div key={lane.laneNumber} className="text-xs">
+                          <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                            {lane.place === 1 ? "🏆" : `${lane.place}.`}
+                          </span>{" "}
+                          <span className="text-zinc-600 dark:text-zinc-400">
+                            #{lane.carNumber} {lane.displayName}
+                          </span>{" "}
+                          <span className="font-mono tabular-nums text-zinc-500 dark:text-zinc-400">
+                            {lane.timeMs != null
+                              ? lane.resultCode === "dnf"
+                                ? `${formatTime(lane.timeMs)} (DNF)`
+                                : `${formatTime(lane.timeMs)}s`
+                              : "—"}
+                          </span>
+                        </div>
+                      ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

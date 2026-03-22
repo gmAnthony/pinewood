@@ -11,6 +11,7 @@ type EventSummary = {
   trackLengthFt: number | null;
   createdAt: string;
   divisionCount: number;
+  hasRaces: boolean;
 };
 
 export async function GET() {
@@ -32,9 +33,12 @@ export async function GET() {
       e.is_public,
       e.track_length_ft,
       e.created_at,
-      COUNT(d.id) AS division_count
+      COUNT(DISTINCT d.id) AS division_count,
+      COUNT(DISTINCT r.id) AS race_count
      FROM events e
      LEFT JOIN divisions d ON d.event_id = e.id
+     LEFT JOIN phases p ON p.event_id = e.id
+     LEFT JOIN races r ON r.phase_id = p.id
      GROUP BY e.id, e.name, e.status, e.is_public, e.track_length_ft, e.created_at
      ORDER BY e.created_at DESC
      LIMIT 100`
@@ -48,6 +52,7 @@ export async function GET() {
     trackLengthFt: row.track_length_ft != null ? Number(row.track_length_ft) : null,
     createdAt: String(row.created_at ?? ""),
     divisionCount: Number(row.division_count ?? 0),
+    hasRaces: Number(row.race_count ?? 0) > 0,
   }));
 
   return NextResponse.json({ events });

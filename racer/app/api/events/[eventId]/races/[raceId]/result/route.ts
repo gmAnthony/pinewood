@@ -12,6 +12,117 @@ type ResultBody = {
   laneResults: LaneResult[];
 };
 
+type LaneEdit = {
+  laneNumber: number;
+  timeMs?: number;
+  resultCode?: "finished" | "dnf";
+};
+
+type EditBody = {
+  laneResults: LaneEdit[];
+};
+
+export async function PATCH(
+  request: Request,
+  context: { params: Promise<{ eventId: string; raceId: string }> }
+) {
+  const { eventId, raceId } = await context.params;
+
+  await ensureDatabaseSchema();
+
+  const raceResult = await turso.execute({
+    sql: `SELECT r.id, r.race_status, r.official_attempt_id
+          FROM races r
+          JOIN phases p ON p.id = r.phase_id
+          WHERE r.id = ? AND p.event_id = ?
+          LIMIT 1`,
+    args: [raceId, eventId],
+  });
+
+  if (raceResult.rows.length === 0) {
+    return NextResponse.json({ error: "Race not found." }, { status: 404 });
+  }
+
+  const race = raceResult.rows[0];
+
+  if (String(race.race_status) !== "finished") {
+    return NextResponse.json(
+      { error: "Only finished races can be edited." },
+      { status: 409 }
+    );
+  }
+
+  const attemptId = race.official_attempt_id;
+  if (!attemptId) {
+    return NextResponse.json(
+      { error: "No official attempt found for this race." },
+      { status: 409 }
+    );
+  }
+
+  const body = (await request.json()) as EditBody;
+
+  if (!Array.isArray(body.laneResults) || body.laneResults.length === 0) {
+    return NextResponse.json({ error: "Lane results are required." }, { status: 400 });
+  }
+
+  try {
+    for (const lr of body.laneResults) {
+      const updates: string[] = [];
+      const args: (string | number)[] = [];
+
+      if (lr.timeMs != null) {
+        updates.push("time_ms = ?");
+        args.push(lr.timeMs);
+      }
+      if (lr.resultCode != null) {
+        const code = lr.resultCode === "dnf" ? "dnf" : "finished";
+        updates.push("result_code = ?");
+        args.push(code);
+      }
+
+      if (updates.length === 0) continue;
+
+      args.push(String(attemptId), lr.laneNumber);
+      await turso.execute({
+        sql: `UPDATE race_attempt_lane_results
+              SET ${updates.join(", ")}
+              WHERE attempt_id = ? AND lane_number = ?`,
+        args,
+      });
+    }
+
+    const allResults = await turso.execute({
+      sql: `SELECT id, lane_number, time_ms, result_code
+            FROM race_attempt_lane_results
+            WHERE attempt_id = ?
+            ORDER BY lane_number`,
+      args: [String(attemptId)],
+    });
+
+    const sorted = [...allResults.rows].sort((a, b) => {
+      const aFinished = String(a.result_code) === "finished";
+      const bFinished = String(b.result_code) === "finished";
+      if (aFinished !== bFinished) return aFinished ? -1 : 1;
+      return Number(a.time_ms ?? 0) - Number(b.time_ms ?? 0);
+    });
+
+    for (let i = 0; i < sorted.length; i++) {
+      await turso.execute({
+        sql: "UPDATE race_attempt_lane_results SET place_in_attempt = ? WHERE id = ?",
+        args: [i + 1, String(sorted[i].id)],
+      });
+    }
+
+    return NextResponse.json({ message: "Results updated." });
+  } catch (error) {
+    return NextResponse.json(
+      { error: `Failed to update results: ${String(error)}` },
+      { status: 500 }
+    );
+  }
+}
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ eventId: string; raceId: string }> }
